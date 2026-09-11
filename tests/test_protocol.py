@@ -262,7 +262,18 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(prof.power(False), (0xD0, b"\x00\x00\x00"))
         self.assertEqual(prof.brightness(42), (0xD2, b"\x2a"))
         self.assertEqual(prof.rgb(1, 2, 3, 0), (0xE2, bytes([4, 1, 2, 3])))
-        self.assertEqual(prof.color_temp(6500, 50), (0xE2, bytes([5, 100])))
+
+    def test_generic_color_temp_inverted_3000_6000(self):
+        prof = p.get_profile("generic")
+        self.assertEqual(prof.min_kelvin, 3000)
+        self.assertEqual(prof.max_kelvin, 6000)
+        # coldest (6000 K) -> 0, warmest (3000 K) -> 100
+        self.assertEqual(prof.color_temp(6000, 50), (0xE2, bytes([5, 0])))
+        self.assertEqual(prof.color_temp(3000, 50), (0xE2, bytes([5, 100])))
+        self.assertEqual(prof.color_temp(4500, 50), (0xE2, bytes([5, 50])))
+        # out-of-range values clamp into the supported band
+        self.assertEqual(prof.color_temp(6500, 50), (0xE2, bytes([5, 0])))
+        self.assertEqual(prof.color_temp(2700, 50), (0xE2, bytes([5, 100])))
 
     def test_unknown_falls_back(self):
         self.assertIs(p.get_profile("nope"), p.PROFILES["livarno"])

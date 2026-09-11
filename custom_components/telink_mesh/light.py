@@ -28,7 +28,7 @@ from .const import (
     SIGNAL_NEW_NODE,
 )
 from .coordinator import TelinkMeshCoordinator, TelinkNode
-from .protocol import ADDR_ALL, MAX_KELVIN, MIN_KELVIN
+from .protocol import ADDR_ALL
 
 _SUPPORTED: dict[str, set[ColorMode]] = {
     COLOR_MODE_RGB_CT: {ColorMode.RGB, ColorMode.COLOR_TEMP},
@@ -78,14 +78,14 @@ class _TelinkLightBase(LightEntity):
 
     _attr_has_entity_name = True
     _attr_should_poll = False
-    _attr_min_color_temp_kelvin = MIN_KELVIN
-    _attr_max_color_temp_kelvin = MAX_KELVIN
 
     def __init__(self, coordinator: TelinkMeshCoordinator) -> None:
         self.coordinator = coordinator
         self._attr_supported_color_modes = _SUPPORTED.get(
             coordinator.color_mode, _SUPPORTED[COLOR_MODE_RGB_CT]
         )
+        self._attr_min_color_temp_kelvin = coordinator.profile.min_kelvin
+        self._attr_max_color_temp_kelvin = coordinator.profile.max_kelvin
 
     @property
     def target(self) -> int:

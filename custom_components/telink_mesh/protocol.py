@@ -420,6 +420,9 @@ class CommandProfile:
     # expects (verified for Livarno). When False, only the online-status
     # report (0xDC) is trusted for feedback and 0xDB is ignored.
     trust_status_report = True
+    # Colour-temperature range the lamp actually supports (Kelvin).
+    min_kelvin = MIN_KELVIN
+    max_kelvin = MAX_KELVIN
 
     def power(self, on: bool) -> tuple[int, bytes]:
         raise NotImplementedError
@@ -469,6 +472,10 @@ class GenericProfile(CommandProfile):
     # The Fulife / Mesh Lamp firmware's 0xDB layout differs from what
     # parse_status_report expects, so we rely on the online-status report only.
     trust_status_report = False
+    # This firmware's white range is 3000-6000 K and its CCT byte runs the
+    # opposite way (0 = coldest, 100 = warmest).
+    min_kelvin = 3000
+    max_kelvin = 6000
 
     def power(self, on: bool) -> tuple[int, bytes]:
         return OP_GENERIC_ON_OFF, bytes([1 if on else 0, 0, 0])
@@ -480,8 +487,10 @@ class GenericProfile(CommandProfile):
         return OP_GENERIC_COLOR, bytes([0x04, red & 0xFF, green & 0xFF, blue & 0xFF])
 
     def color_temp(self, kelvin: int, brightness: int) -> tuple[int, bytes]:
-        kelvin = max(MIN_KELVIN, min(MAX_KELVIN, int(kelvin)))
-        percent = int(round((kelvin - MIN_KELVIN) * 100 / (MAX_KELVIN - MIN_KELVIN)))
+        kelvin = max(self.min_kelvin, min(self.max_kelvin, int(kelvin)))
+        span = self.max_kelvin - self.min_kelvin
+        # Inverted: 0 = coldest (max K), 100 = warmest (min K).
+        percent = int(round((self.max_kelvin - kelvin) * 100 / span))
         return OP_GENERIC_COLOR, bytes([0x05, percent])
 
 
