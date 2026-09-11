@@ -69,6 +69,9 @@ class TelinkMeshConnection:
         self._sequence = SequenceCounter()
         self._write_lock = asyncio.Lock()
         self._expected_disconnect = False
+        # Set during login: True when we managed to subscribe to status
+        # notifications, False when the device/proxy would not allow it.
+        self.notifications_enabled = False
 
     @property
     def address(self) -> str | None:
@@ -124,11 +127,28 @@ class TelinkMeshConnection:
         )
         self._mac_le = mac_to_le(address)
 
+        # Notifications (characteristic ...1911) are only used for status
+        # feedback. Some Telink firmwares (and some stale ESPHome service
+        # caches) expose the notify characteristic without a CCCD descriptor,
+        # so bleak's start_notify cannot subscribe. That must not block the
+        # session: commands are plain writes to ...1912 and work regardless.
+        self.notifications_enabled = False
         try:
             await client.start_notify(NOTIFY_CHAR_UUID, self._handle_notification)
+            self.notifications_enabled = True
+        except (BleakError, TimeoutError, asyncio.TimeoutError) as err:
+            _LOGGER.warning(
+                "Mesh %s: status notifications unavailable (%s); continuing without "
+                "them, the light stays controllable but state feedback is optimistic",
+                self._mesh_name,
+                err,
+            )
+        # Ask the device to start reporting even when we could not subscribe via
+        # a CCCD: this is a plain value write and is harmless if it fails.
+        try:
             await client.write_gatt_char(NOTIFY_CHAR_UUID, b"\x01", response=True)
         except (BleakError, TimeoutError, asyncio.TimeoutError) as err:
-            raise TelinkConnectionError(f"enabling notifications failed: {err}") from err
+            _LOGGER.debug("Mesh %s: notify enable write failed: %s", self._mesh_name, err)
 
     async def disconnect(self) -> None:
         client = self._client

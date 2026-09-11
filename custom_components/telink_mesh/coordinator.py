@@ -145,6 +145,10 @@ class TelinkMeshCoordinator:
         self.nodes: dict[int, TelinkNode] = {}
         self.connected_mesh_id: int | None = None
         self.auth_failed = False
+        # True when the connected node would not give us status notifications;
+        # in that case entity state is optimistic and availability follows the
+        # mesh connection instead of per-node online reports.
+        self.optimistic = False
         self._store: Store[dict[str, Any]] = Store(
             hass, STORAGE_VERSION, f"{STORAGE_KEY}.{entry.entry_id}"
         )
@@ -282,17 +286,19 @@ class TelinkMeshCoordinator:
         first_time = address not in self._candidates
         self._candidates[address] = time.monotonic()
 
+        # Advertisements are only trustworthy for RSSI of nodes we already know
+        # by MAC. The manufacturer-data layout varies between Telink vendors, so
+        # we do NOT invent nodes (or mesh ids) from it; nodes come from the
+        # decrypted status/address reports and from persisted storage. This
+        # keeps a single spurious entity from appearing per vendor quirk.
         payload = service_info.manufacturer_data.get(TELINK_MANUFACTURER_ID)
         adv = parse_manufacturer_data(payload) if payload else None
-        if adv and adv.mesh_id is not None and self._is_node_address(adv.mesh_id):
-            node = self._get_or_create_node(adv.mesh_id)
-            node.rssi = service_info.rssi
-            node.advertised_product = adv.product_uuid
-            if node.mac != address:
-                node.mac = address
-                self._known_macs.add(address)
-                self._schedule_save()
-                self._notify_listeners()
+        for node in self.nodes.values():
+            if node.mac == address:
+                node.rssi = service_info.rssi
+                if adv and adv.product_uuid is not None:
+                    node.advertised_product = adv.product_uuid
+                break
 
         if first_time:
             _LOGGER.debug("Mesh %s: candidate %s (rssi %s)", self.mesh_name, address, service_info.rssi)
@@ -352,9 +358,20 @@ class TelinkMeshCoordinator:
 
             if connected:
                 attempt = 0
+                self.optimistic = not self._connection.notifications_enabled
                 _LOGGER.info(
-                    "Mesh %s: connected through %s", self.mesh_name, self._connection.address
+                    "Mesh %s: connected through %s%s",
+                    self.mesh_name,
+                    self._connection.address,
+                    " (optimistic, no status notifications)" if self.optimistic else "",
                 )
+                if self.optimistic:
+                    # No status feedback will arrive, so make already-known
+                    # nodes controllable instead of leaving them unavailable.
+                    now = time.monotonic()
+                    for node in self.nodes.values():
+                        node.online = True
+                        node.last_seen = now
                 self._notify_listeners()
                 await self._post_connect()
                 continue
@@ -415,14 +432,17 @@ class TelinkMeshCoordinator:
         return True
 
     async def _async_poll(self, _now: datetime) -> None:
-        stale_before = time.monotonic() - NODE_STALE_SECONDS
-        changed = False
-        for node in self.nodes.values():
-            if node.online and node.last_seen and node.last_seen < stale_before:
-                node.online = False
-                changed = True
-        if changed:
-            self._notify_listeners()
+        # Without status notifications there is nothing to go stale on; keep the
+        # nodes controllable as long as the mesh connection is up.
+        if not self.optimistic:
+            stale_before = time.monotonic() - NODE_STALE_SECONDS
+            changed = False
+            for node in self.nodes.values():
+                if node.online and node.last_seen and node.last_seen < stale_before:
+                    node.online = False
+                    changed = True
+            if changed:
+                self._notify_listeners()
         if self._connection.connected:
             await self._try_send(ADDR_ALL, *self.profile.status_query())
 
@@ -585,6 +605,8 @@ class TelinkMeshCoordinator:
             "connected_address": self.connected_address,
             "connected_mesh_id": self.connected_mesh_id,
             "auth_failed": self.auth_failed,
+            "optimistic": self.optimistic,
+            "notifications_enabled": self._connection.notifications_enabled,
             "candidates": sorted(self._candidates),
             "nodes": [
                 {

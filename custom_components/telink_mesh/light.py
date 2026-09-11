@@ -146,7 +146,11 @@ class TelinkNodeLight(_TelinkLightBase):
 
     @property
     def available(self) -> bool:
-        return self.coordinator.connected and self._node.online
+        if not self.coordinator.connected:
+            return False
+        # Without status notifications we cannot know per-node online state, so
+        # follow the mesh connection instead of leaving the light unavailable.
+        return self.coordinator.optimistic or self._node.online
 
     @property
     def is_on(self) -> bool:
