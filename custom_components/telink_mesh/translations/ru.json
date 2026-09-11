@@ -1,0 +1,91 @@
+{
+  "config": {
+    "flow_title": "Telink mesh {name}",
+    "step": {
+      "user": {
+        "title": "Добавить Telink BLE mesh",
+        "description": "Сейчас в эфире сетей: {count}. Выберите ваш продукт, чтобы имя сети и пароль подставились автоматически, либо выберите «Ручной ввод».",
+        "data": {
+          "preset": "Продукт / профиль"
+        }
+      },
+      "bluetooth_confirm": {
+        "title": "Обнаружена Telink mesh-сеть",
+        "description": "Устройство {address} сообщает имя сети **{name}**. Выберите ваш продукт для автозаполнения данных или «Ручной ввод».",
+        "data": {
+          "preset": "Продукт / профиль"
+        }
+      },
+      "credentials": {
+        "title": "Данные mesh-сети",
+        "description": "Профиль: {preset}. Проверьте имя сети и пароль (при необходимости измените), затем выберите набор команд и возможности ламп.",
+        "data": {
+          "mesh_name": "Имя mesh-сети",
+          "mesh_password": "Пароль mesh-сети",
+          "profile": "Набор команд",
+          "color_mode": "Возможности ламп"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Сеть {name} отклонила пароль",
+        "data": {
+          "mesh_password": "Пароль mesh-сети"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Не удалось подключиться ни к одному узлу сети. Убедитесь, что лампа включена и находится в зоне действия Bluetooth-адаптера или ESPHome-прокси.",
+      "invalid_auth": "Лампа отклонила имя/пароль mesh-сети.",
+      "no_devices_found": "В зоне действия нет Telink-устройств с таким именем сети."
+    },
+    "abort": {
+      "already_configured": "Эта mesh-сеть уже настроена.",
+      "already_in_progress": "Настройка этой сети уже выполняется.",
+      "not_supported": "Это устройство не является Telink mesh-устройством.",
+      "reauth_successful": "Пароль обновлён."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Параметры Telink mesh",
+        "data": {
+          "profile": "Набор команд",
+          "color_mode": "Возможности ламп",
+          "write_with_response": "Отправлять команды с подтверждением (медленнее, но надёжнее на некоторых прокси)",
+          "poll_interval": "Интервал опроса состояния"
+        }
+      }
+    }
+  },
+  "selector": {
+    "preset": {
+      "options": {
+        "mesh_lamp": "Mesh Lamp / Fulife (имя сети: Fulife)",
+        "manual": "Ручной ввод"
+      }
+    },
+    "profile": {
+      "options": {
+        "livarno": "Lidl Livarno / Briloner / C by GE (команды 0xF0/0xF1)",
+        "generic": "Стандартный Telink SDK (команды 0xD0/0xD2/0xE2)"
+      }
+    },
+    "color_mode": {
+      "options": {
+        "rgb_ct": "RGB + цветовая температура белого",
+        "rgb": "Только RGB",
+        "ct": "Только цветовая температура белого",
+        "brightness": "Диммируемый белый",
+        "onoff": "Только вкл/выкл"
+      }
+    }
+  },
+  "entity": {
+    "light": {
+      "all_lights": {
+        "name": "Все лампы"
+      }
+    }
+  }
+}

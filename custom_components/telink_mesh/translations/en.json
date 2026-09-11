@@ -1,0 +1,91 @@
+{
+  "config": {
+    "flow_title": "Telink mesh {name}",
+    "step": {
+      "user": {
+        "title": "Add a Telink BLE mesh",
+        "description": "Meshes currently advertising: {count}. Choose your product to fill in the mesh name and password automatically, or pick Manual entry.",
+        "data": {
+          "preset": "Product / preset"
+        }
+      },
+      "bluetooth_confirm": {
+        "title": "Telink mesh discovered",
+        "description": "Device {address} advertises mesh **{name}**. Choose your product to fill in the credentials automatically, or pick Manual entry.",
+        "data": {
+          "preset": "Product / preset"
+        }
+      },
+      "credentials": {
+        "title": "Mesh credentials",
+        "description": "Preset: {preset}. Check the mesh name and password (edit if needed), then choose the command set and light capabilities.",
+        "data": {
+          "mesh_name": "Mesh name",
+          "mesh_password": "Mesh password",
+          "profile": "Command set",
+          "color_mode": "Light capabilities"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Mesh {name} rejected the password",
+        "data": {
+          "mesh_password": "Mesh password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not connect to any node of the mesh. Make sure a lamp is powered and within range of a Bluetooth adapter or ESPHome proxy.",
+      "invalid_auth": "The lamp rejected the mesh name / password.",
+      "no_devices_found": "No Telink device advertising this mesh name is in range."
+    },
+    "abort": {
+      "already_configured": "This mesh is already configured.",
+      "already_in_progress": "Configuration of this mesh is already in progress.",
+      "not_supported": "This device is not a Telink mesh device.",
+      "reauth_successful": "The password was updated."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Telink mesh options",
+        "data": {
+          "profile": "Command set",
+          "color_mode": "Light capabilities",
+          "write_with_response": "Write commands with response (slower, more reliable on some proxies)",
+          "poll_interval": "Status poll interval"
+        }
+      }
+    }
+  },
+  "selector": {
+    "preset": {
+      "options": {
+        "mesh_lamp": "Mesh Lamp / Fulife (name: Fulife)",
+        "manual": "Manual entry"
+      }
+    },
+    "profile": {
+      "options": {
+        "livarno": "Lidl Livarno / Briloner / C by GE (opcodes 0xF0/0xF1)",
+        "generic": "Generic Telink SDK (opcodes 0xD0/0xD2/0xE2)"
+      }
+    },
+    "color_mode": {
+      "options": {
+        "rgb_ct": "RGB + white colour temperature",
+        "rgb": "RGB only",
+        "ct": "White colour temperature only",
+        "brightness": "Dimmable white",
+        "onoff": "On/off only"
+      }
+    }
+  },
+  "entity": {
+    "light": {
+      "all_lights": {
+        "name": "All lights"
+      }
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "domain": "telink_mesh",
+  "name": "Telink BLE Mesh",
+  "bluetooth": [
+    {
+      "manufacturer_id": 529,
+      "connectable": true
+    },
+    {
+      "service_uuid": "00001910-0000-1000-8000-00805f9b34fb",
+      "connectable": true
+    }
+  ],
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": ["bluetooth_adapters"],
+  "documentation": "https://github.com/jseglobalsolutions/ha-telink-mesh",
+  "integration_type": "hub",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/jseglobalsolutions/ha-telink-mesh/issues",
+  "requirements": ["bleak-retry-connector>=3.4.0"],
+  "version": "0.1.0"
+}
