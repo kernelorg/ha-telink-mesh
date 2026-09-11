@@ -416,6 +416,10 @@ class CommandProfile:
     """Builds ``(opcode, params)`` pairs for a family of Telink lights."""
 
     key = "base"
+    # Whether the 0xDB status report follows the layout parse_status_report
+    # expects (verified for Livarno). When False, only the online-status
+    # report (0xDC) is trusted for feedback and 0xDB is ignored.
+    trust_status_report = True
 
     def power(self, on: bool) -> tuple[int, bytes]:
         raise NotImplementedError
@@ -462,6 +466,9 @@ class GenericProfile(CommandProfile):
     """Stock Telink mesh light SDK opcodes (python-dimond / python-tikteck)."""
 
     key = "generic"
+    # The Fulife / Mesh Lamp firmware's 0xDB layout differs from what
+    # parse_status_report expects, so we rely on the online-status report only.
+    trust_status_report = False
 
     def power(self, on: bool) -> tuple[int, bytes]:
         return OP_GENERIC_ON_OFF, bytes([1 if on else 0, 0, 0])

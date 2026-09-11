@@ -27,7 +27,17 @@ CREDENTIAL_PRESETS: Final = {
     "mesh_lamp": {
         CONF_MESH_NAME: "Fulife",
         CONF_MESH_PASSWORD: "2846",
-        CONF_PROFILE: PROFILE_LIVARNO,
+        # Verified on real hardware: the Mesh Lamp / Fulife firmware uses the
+        # generic Telink SDK opcodes (0xD0/0xD2/0xE2), not the Livarno set.
+        CONF_PROFILE: PROFILE_GENERIC,
+        CONF_COLOR_MODE: "rgb_ct",
+    },
+    "vtac": {
+        # V-TAC smart bulbs use the same Fulife credentials and the generic
+        # Telink SDK command set.
+        CONF_MESH_NAME: "Fulife",
+        CONF_MESH_PASSWORD: "2846",
+        CONF_PROFILE: PROFILE_GENERIC,
         CONF_COLOR_MODE: "rgb_ct",
     },
 }

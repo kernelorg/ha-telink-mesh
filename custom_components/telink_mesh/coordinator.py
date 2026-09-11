@@ -478,6 +478,10 @@ class TelinkMeshCoordinator:
             elif note.opcode == OP_STATUS_REPORT:
                 if not self._is_node_address(note.source):
                     return
+                if not self.profile.trust_status_report:
+                    # This firmware's 0xDB layout is unknown; on/off and
+                    # brightness come from the online-status report instead.
+                    return
                 report = parse_status_report(note.params)
                 node = self._get_or_create_node(note.source)
                 node.online = True

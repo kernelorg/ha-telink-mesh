@@ -72,6 +72,8 @@ class TelinkMeshConnection:
         # Set during login: True when we managed to subscribe to status
         # notifications, False when the device/proxy would not allow it.
         self.notifications_enabled = False
+        # Stop handle for the ESPHome-proxy notify fallback, if used.
+        self._esp_notify_stop = None
 
     @property
     def address(self) -> str | None:
@@ -127,33 +129,81 @@ class TelinkMeshConnection:
         )
         self._mac_le = mac_to_le(address)
 
-        # Notifications (characteristic ...1911) are only used for status
-        # feedback. Some Telink firmwares (and some stale ESPHome service
-        # caches) expose the notify characteristic without a CCCD descriptor,
-        # so bleak's start_notify cannot subscribe. That must not block the
-        # session: commands are plain writes to ...1912 and work regardless.
+        # Notifications (characteristic ...1911) carry the status feedback.
+        # Telink firmwares enable them by writing 0x01 to the characteristic
+        # value (not via a CCCD descriptor), and several expose the notify char
+        # WITHOUT a CCCD at all -- which makes bleak's standard start_notify
+        # refuse to subscribe over an ESPHome proxy. We therefore try bleak
+        # first and, on failure, fall back to subscribing directly through the
+        # ESPHome proxy by handle (no CCCD needed). Either way it must never
+        # block the session: commands are plain writes to ...1912.
         self.notifications_enabled = False
         try:
             await client.start_notify(NOTIFY_CHAR_UUID, self._handle_notification)
             self.notifications_enabled = True
         except (BleakError, TimeoutError, asyncio.TimeoutError) as err:
-            _LOGGER.warning(
-                "Mesh %s: status notifications unavailable (%s); continuing without "
-                "them, the light stays controllable but state feedback is optimistic",
-                self._mesh_name,
-                err,
-            )
-        # Ask the device to start reporting even when we could not subscribe via
-        # a CCCD: this is a plain value write and is harmless if it fails.
+            _LOGGER.debug("Mesh %s: bleak start_notify failed (%s); trying proxy fallback", self._mesh_name, err)
+            self.notifications_enabled = await self._start_notify_via_proxy(client)
+
+        # Tell the device to start reporting; plain value write, harmless if it
+        # fails, and required for the proxy fallback to receive anything.
         try:
             await client.write_gatt_char(NOTIFY_CHAR_UUID, b"\x01", response=True)
         except (BleakError, TimeoutError, asyncio.TimeoutError) as err:
             _LOGGER.debug("Mesh %s: notify enable write failed: %s", self._mesh_name, err)
 
+        if not self.notifications_enabled:
+            _LOGGER.warning(
+                "Mesh %s: status notifications unavailable; the light stays "
+                "controllable but its state in Home Assistant is optimistic",
+                self._mesh_name,
+            )
+
+    async def _start_notify_via_proxy(self, client: BleakClient) -> bool:
+        """Subscribe to notifications directly through an ESPHome proxy.
+
+        Bypasses bleak's requirement for a CCCD descriptor by calling the
+        aioesphomeapi client's ``bluetooth_gatt_start_notify`` with the notify
+        characteristic handle. Only works when the transport is an ESPHome
+        proxy; returns False (staying optimistic) for any other backend or if
+        the internal API is not shaped as expected.
+        """
+        try:
+            char = client.services.get_characteristic(NOTIFY_CHAR_UUID)
+            if char is None:
+                return False
+            backend = getattr(client, "_backend", None)
+            api = getattr(backend, "_client", None)
+            addr_int = getattr(backend, "_address_as_int", None)
+            if api is None or addr_int is None:
+                return False
+            start = getattr(api, "bluetooth_gatt_start_notify", None)
+            if start is None:
+                return False
+
+            def _on_notify(_handle: int, data: bytearray) -> None:
+                self._handle_notification(_handle, bytearray(data))
+
+            result = await start(addr_int, char.handle, _on_notify)
+            # aioesphomeapi returns (stop_coro, cancel) — keep the stop handle.
+            self._esp_notify_stop = result[0] if isinstance(result, tuple) else None
+        except Exception as err:  # noqa: BLE001 - never let this break the session
+            _LOGGER.debug("Mesh %s: proxy notify fallback failed: %s", self._mesh_name, err)
+            return False
+        _LOGGER.info("Mesh %s: status notifications enabled via ESPHome proxy", self._mesh_name)
+        return True
+
     async def disconnect(self) -> None:
         client = self._client
         self._client = None
         self._expected_disconnect = True
+        stop = self._esp_notify_stop
+        self._esp_notify_stop = None
+        if stop is not None:
+            try:
+                await stop()
+            except Exception as err:  # noqa: BLE001 - best effort
+                _LOGGER.debug("Error stopping proxy notify: %s", err)
         if client is not None:
             try:
                 await client.disconnect()

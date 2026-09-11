@@ -62,6 +62,7 @@
     "preset": {
       "options": {
         "mesh_lamp": "Mesh Lamp / Fulife (имя сети: Fulife)",
+        "vtac": "Умная лампа V-TAC (имя сети: Fulife)",
         "manual": "Ручной ввод"
       }
     },

@@ -201,6 +201,38 @@ class ParserTests(unittest.TestCase):
         self.assertIsNone(short.mac)
 
 
+class FulifeOnlineStatusTests(unittest.TestCase):
+    """Real decrypted 0xDC online-status params captured from a Fulife lamp."""
+
+    def _entry(self, params_hex):
+        params = bytes(int(x, 16) for x in params_hex.split(","))
+        entries = p.parse_online_status(params)
+        self.assertEqual(len(entries), 1)
+        return entries[0]
+
+    def test_off(self):
+        e = self._entry("51,49,00,FF,00,00,00,00,00,00")
+        self.assertEqual(e.mesh_id, 0x51)
+        self.assertTrue(e.online)
+        self.assertFalse(e.is_on)
+
+    def test_on_full(self):
+        e = self._entry("51,64,64,FF,00,00,00,00,00,00")
+        self.assertTrue(e.is_on)
+        self.assertEqual(e.brightness, 100)
+
+    def test_on_dimmed(self):
+        e = self._entry("51,76,37,FF,00,00,00,00,00,00")
+        self.assertTrue(e.is_on)
+        self.assertEqual(e.brightness, 0x37)
+
+
+class ProfileStatusTrustTests(unittest.TestCase):
+    def test_flags(self):
+        self.assertTrue(p.get_profile("livarno").trust_status_report)
+        self.assertFalse(p.get_profile("generic").trust_status_report)
+
+
 class ColorTests(unittest.TestCase):
     def test_kelvin_to_yw_matches_telinkpp(self):
         self.assertEqual(p.kelvin_to_yw(2700), (255, 0))

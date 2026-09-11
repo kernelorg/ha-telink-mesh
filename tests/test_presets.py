@@ -43,7 +43,7 @@ class PresetTests(unittest.TestCase):
         preset = const.CREDENTIAL_PRESETS["mesh_lamp"]
         self.assertEqual(preset[const.CONF_MESH_NAME], "Fulife")
         self.assertEqual(preset[const.CONF_MESH_PASSWORD], "2846")
-        self.assertEqual(preset[const.CONF_PROFILE], const.PROFILE_LIVARNO)
+        self.assertEqual(preset[const.CONF_PROFILE], const.PROFILE_GENERIC)
 
     def test_mesh_lamp_preset_reproduces_login(self):
         preset = const.CREDENTIAL_PRESETS["mesh_lamp"]
@@ -54,6 +54,12 @@ class PresetTests(unittest.TestCase):
             expected = packet[9:17]
             request, _ = p.build_pair_request(name, pwd, random8)
             self.assertEqual(request[9:17], expected)
+
+    def test_vtac_matches_generic_and_fulife(self):
+        preset = const.CREDENTIAL_PRESETS["vtac"]
+        self.assertEqual(preset[const.CONF_MESH_NAME], "Fulife")
+        self.assertEqual(preset[const.CONF_MESH_PASSWORD], "2846")
+        self.assertEqual(preset[const.CONF_PROFILE], const.PROFILE_GENERIC)
 
     def test_manual_is_last_and_default_is_first(self):
         self.assertEqual(const.PRESETS[-1], const.PRESET_MANUAL)

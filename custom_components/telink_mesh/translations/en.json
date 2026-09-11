@@ -62,6 +62,7 @@
     "preset": {
       "options": {
         "mesh_lamp": "Mesh Lamp / Fulife (name: Fulife)",
+        "vtac": "V-TAC smart bulb (name: Fulife)",
         "manual": "Manual entry"
       }
     },
