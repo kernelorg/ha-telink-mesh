@@ -433,8 +433,17 @@ class CommandProfile:
     def rgb(self, red: int, green: int, blue: int, brightness: int) -> tuple[int, bytes]:
         raise NotImplementedError
 
-    def color_temp(self, kelvin: int, brightness: int) -> tuple[int, bytes]:
+    def color_temp(
+        self, kelvin: int, brightness: int, min_kelvin: int | None = None, max_kelvin: int | None = None
+    ) -> tuple[int, bytes]:
         raise NotImplementedError
+
+    def _range(self, min_kelvin: int | None, max_kelvin: int | None) -> tuple[int, int]:
+        lo = self.min_kelvin if min_kelvin is None else int(min_kelvin)
+        hi = self.max_kelvin if max_kelvin is None else int(max_kelvin)
+        if hi <= lo:
+            hi = lo + 1
+        return lo, hi
 
     def status_query(self) -> tuple[int, bytes]:
         return OP_STATUS_QUERY, b"\x10"
@@ -459,9 +468,12 @@ class LivarnoProfile(CommandProfile):
             [brightness, red & 0xFF, green & 0xFF, blue & 0xFF, 0, 0, 0, 0]
         )
 
-    def color_temp(self, kelvin: int, brightness: int) -> tuple[int, bytes]:
+    def color_temp(
+        self, kelvin: int, brightness: int, min_kelvin: int | None = None, max_kelvin: int | None = None
+    ) -> tuple[int, bytes]:
         brightness = max(1, clamp_brightness(brightness))
-        y, w = kelvin_to_yw(kelvin)
+        lo, hi = self._range(min_kelvin, max_kelvin)
+        y, w = kelvin_to_yw(max(lo, min(hi, int(kelvin))))
         return OP_LIVARNO_ATTRIBUTES, bytes([brightness, 0, 0, 0, y, w, 0, 0])
 
 
@@ -486,11 +498,13 @@ class GenericProfile(CommandProfile):
     def rgb(self, red: int, green: int, blue: int, brightness: int) -> tuple[int, bytes]:
         return OP_GENERIC_COLOR, bytes([0x04, red & 0xFF, green & 0xFF, blue & 0xFF])
 
-    def color_temp(self, kelvin: int, brightness: int) -> tuple[int, bytes]:
-        kelvin = max(self.min_kelvin, min(self.max_kelvin, int(kelvin)))
-        span = self.max_kelvin - self.min_kelvin
+    def color_temp(
+        self, kelvin: int, brightness: int, min_kelvin: int | None = None, max_kelvin: int | None = None
+    ) -> tuple[int, bytes]:
+        lo, hi = self._range(min_kelvin, max_kelvin)
+        kelvin = max(lo, min(hi, int(kelvin)))
         # Inverted: 0 = coldest (max K), 100 = warmest (min K).
-        percent = int(round((self.max_kelvin - kelvin) * 100 / span))
+        percent = int(round((hi - kelvin) * 100 / (hi - lo)))
         return OP_GENERIC_COLOR, bytes([0x05, percent])
 
 

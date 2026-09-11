@@ -13,6 +13,12 @@ CONF_COLOR_MODE: Final = "color_mode"
 CONF_WRITE_WITH_RESPONSE: Final = "write_with_response"
 CONF_POLL_INTERVAL: Final = "poll_interval"
 CONF_ADDRESS: Final = "address"
+CONF_COLOR_TEMP_MIN: Final = "color_temp_min"
+CONF_COLOR_TEMP_MAX: Final = "color_temp_max"
+
+# Absolute bounds the override fields accept (Kelvin).
+ABS_MIN_KELVIN: Final = 1000
+ABS_MAX_KELVIN: Final = 10000
 
 PROFILE_LIVARNO: Final = "livarno"
 PROFILE_GENERIC: Final = "generic"

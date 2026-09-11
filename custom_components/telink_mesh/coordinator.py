@@ -29,6 +29,8 @@ import homeassistant.util.dt as dt_util
 
 from .const import (
     CONF_COLOR_MODE,
+    CONF_COLOR_TEMP_MAX,
+    CONF_COLOR_TEMP_MIN,
     CONF_MESH_NAME,
     CONF_MESH_PASSWORD,
     CONF_POLL_INTERVAL,
@@ -132,6 +134,13 @@ class TelinkMeshCoordinator:
         self._password: str = entry.data[CONF_MESH_PASSWORD]
         self.profile = get_profile(options.get(CONF_PROFILE, DEFAULT_PROFILE))
         self.color_mode: str = options.get(CONF_COLOR_MODE, DEFAULT_COLOR_MODE)
+        # White colour-temperature bounds: use the per-entry override when set,
+        # otherwise the profile's defaults.
+        self.color_temp_min = int(options.get(CONF_COLOR_TEMP_MIN) or self.profile.min_kelvin)
+        self.color_temp_max = int(options.get(CONF_COLOR_TEMP_MAX) or self.profile.max_kelvin)
+        if self.color_temp_max <= self.color_temp_min:
+            self.color_temp_min = self.profile.min_kelvin
+            self.color_temp_max = self.profile.max_kelvin
         self._poll_interval = int(options.get(CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL))
         self._connection = TelinkMeshConnection(
             self.mesh_name,
@@ -565,7 +574,11 @@ class TelinkMeshCoordinator:
         if rgb is not None:
             commands.append(self.profile.rgb(*rgb, level))
         elif color_temp_kelvin is not None:
-            commands.append(self.profile.color_temp(color_temp_kelvin, level))
+            commands.append(
+                self.profile.color_temp(
+                    color_temp_kelvin, level, self.color_temp_min, self.color_temp_max
+                )
+            )
         elif brightness is not None:
             commands.append(self.profile.brightness(level))
 
@@ -611,6 +624,8 @@ class TelinkMeshCoordinator:
             "auth_failed": self.auth_failed,
             "optimistic": self.optimistic,
             "notifications_enabled": self._connection.notifications_enabled,
+            "color_temp_min": self.color_temp_min,
+            "color_temp_max": self.color_temp_max,
             "candidates": sorted(self._candidates),
             "nodes": [
                 {

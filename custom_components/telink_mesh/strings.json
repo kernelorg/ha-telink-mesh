@@ -52,10 +52,15 @@
         "data": {
           "profile": "Command set",
           "color_mode": "Light capabilities",
+          "color_temp_min": "Minimum white colour temperature (K)",
+          "color_temp_max": "Maximum white colour temperature (K)",
           "write_with_response": "Write commands with response (slower, more reliable on some proxies)",
           "poll_interval": "Status poll interval"
         }
       }
+    },
+    "error": {
+      "bad_color_temp_range": "The maximum temperature must be greater than the minimum."
     }
   },
   "selector": {

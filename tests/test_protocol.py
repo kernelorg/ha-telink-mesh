@@ -275,6 +275,21 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(prof.color_temp(6500, 50), (0xE2, bytes([5, 0])))
         self.assertEqual(prof.color_temp(2700, 50), (0xE2, bytes([5, 100])))
 
+    def test_generic_color_temp_override_range(self):
+        prof = p.get_profile("generic")
+        # Override to 2000-7000 K; still inverted (cold=0, warm=100).
+        self.assertEqual(prof.color_temp(7000, 50, 2000, 7000), (0xE2, bytes([5, 0])))
+        self.assertEqual(prof.color_temp(2000, 50, 2000, 7000), (0xE2, bytes([5, 100])))
+        self.assertEqual(prof.color_temp(4500, 50, 2000, 7000), (0xE2, bytes([5, 50])))
+
+    def test_livarno_color_temp_respects_override_clamp(self):
+        prof = p.get_profile("livarno")
+        # Within an override band, endpoints map to the Y/W extremes.
+        op, params = prof.color_temp(6000, 100, 3000, 6000)
+        self.assertEqual(op, 0xF1)
+        op2, params2 = prof.color_temp(3000, 100, 3000, 6000)
+        self.assertNotEqual(params, params2)
+
     def test_unknown_falls_back(self):
         self.assertIs(p.get_profile("nope"), p.PROFILES["livarno"])
 

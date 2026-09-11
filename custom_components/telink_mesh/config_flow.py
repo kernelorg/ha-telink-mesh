@@ -42,8 +42,12 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import (
+    ABS_MAX_KELVIN,
+    ABS_MIN_KELVIN,
     COLOR_MODES,
     CONF_COLOR_MODE,
+    CONF_COLOR_TEMP_MAX,
+    CONF_COLOR_TEMP_MIN,
     CONF_MESH_NAME,
     CONF_MESH_PASSWORD,
     CONF_POLL_INTERVAL,
@@ -66,6 +70,7 @@ from .const import (
 )
 from .coordinator import advertised_mesh_name, is_telink_advertisement
 from .mesh import TelinkAuthError, TelinkError, TelinkMeshConnection
+from .protocol import get_profile
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -368,9 +373,29 @@ class TelinkMeshOptionsFlow(OptionsFlow):
     """Options: command profile, colour modes, write mode, poll interval."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        if user_input is not None:
-            return self.async_create_entry(data=user_input)
+        errors: dict[str, str] = {}
         options = {**self.config_entry.data, **self.config_entry.options}
+        if user_input is not None:
+            if user_input[CONF_COLOR_TEMP_MAX] <= user_input[CONF_COLOR_TEMP_MIN]:
+                errors["base"] = "bad_color_temp_range"
+            else:
+                user_input[CONF_COLOR_TEMP_MIN] = int(user_input[CONF_COLOR_TEMP_MIN])
+                user_input[CONF_COLOR_TEMP_MAX] = int(user_input[CONF_COLOR_TEMP_MAX])
+                return self.async_create_entry(data=user_input)
+            options = {**options, **user_input}
+
+        profile = get_profile(options.get(CONF_PROFILE, DEFAULT_PROFILE))
+
+        def kelvin_field() -> NumberSelector:
+            return NumberSelector(
+                NumberSelectorConfig(
+                    min=ABS_MIN_KELVIN,
+                    max=ABS_MAX_KELVIN,
+                    step=50,
+                    mode=NumberSelectorMode.BOX,
+                    unit_of_measurement="K",
+                )
+            )
         schema = vol.Schema(
             {
                 vol.Required(
@@ -379,6 +404,14 @@ class TelinkMeshOptionsFlow(OptionsFlow):
                 vol.Required(
                     CONF_COLOR_MODE, default=options.get(CONF_COLOR_MODE, DEFAULT_COLOR_MODE)
                 ): _color_mode_selector(),
+                vol.Required(
+                    CONF_COLOR_TEMP_MIN,
+                    default=int(options.get(CONF_COLOR_TEMP_MIN) or profile.min_kelvin),
+                ): kelvin_field(),
+                vol.Required(
+                    CONF_COLOR_TEMP_MAX,
+                    default=int(options.get(CONF_COLOR_TEMP_MAX) or profile.max_kelvin),
+                ): kelvin_field(),
                 vol.Required(
                     CONF_WRITE_WITH_RESPONSE,
                     default=options.get(CONF_WRITE_WITH_RESPONSE, DEFAULT_WRITE_WITH_RESPONSE),
@@ -397,4 +430,4 @@ class TelinkMeshOptionsFlow(OptionsFlow):
                 ),
             }
         )
-        return self.async_show_form(step_id="init", data_schema=schema)
+        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)

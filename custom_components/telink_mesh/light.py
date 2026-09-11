@@ -84,8 +84,8 @@ class _TelinkLightBase(LightEntity):
         self._attr_supported_color_modes = _SUPPORTED.get(
             coordinator.color_mode, _SUPPORTED[COLOR_MODE_RGB_CT]
         )
-        self._attr_min_color_temp_kelvin = coordinator.profile.min_kelvin
-        self._attr_max_color_temp_kelvin = coordinator.profile.max_kelvin
+        self._attr_min_color_temp_kelvin = coordinator.color_temp_min
+        self._attr_max_color_temp_kelvin = coordinator.color_temp_max
 
     @property
     def target(self) -> int:
