@@ -321,10 +321,12 @@ class TelinkMeshCoordinator:
                 continue
 
             connected = False
-            for device in self._sorted_candidates()[:MAX_CONNECT_CANDIDATES]:
+            candidates = self._sorted_candidates()[:MAX_CONNECT_CANDIDATES]
+            for device in candidates:
                 if self._stopping:
                     return
                 try:
+                    _LOGGER.debug("Mesh %s: connecting to %s", self.mesh_name, device.address)
                     await self._connection.connect(device)
                 except TelinkAuthError:
                     _LOGGER.error(
@@ -335,7 +337,15 @@ class TelinkMeshCoordinator:
                     self.entry.async_start_reauth(self.hass)
                     return
                 except TelinkConnectionError as err:
-                    _LOGGER.debug("Mesh %s: %s: %s", self.mesh_name, device.address, err)
+                    _LOGGER.log(
+                        # First failure of a cycle is worth a warning; later
+                        # retries stay at debug to avoid flooding the log.
+                        logging.WARNING if attempt == 0 else logging.DEBUG,
+                        "Mesh %s: could not connect to %s: %s",
+                        self.mesh_name,
+                        device.address,
+                        err,
+                    )
                     continue
                 connected = True
                 break
@@ -350,9 +360,28 @@ class TelinkMeshCoordinator:
                 continue
 
             delay = RECONNECT_DELAYS[min(attempt, len(RECONNECT_DELAYS) - 1)]
+            if attempt == 0:
+                if not self._candidates:
+                    _LOGGER.warning(
+                        "Mesh %s: no device advertising this mesh is in range of a "
+                        "connectable Bluetooth adapter or proxy yet",
+                        self.mesh_name,
+                    )
+                elif not candidates:
+                    _LOGGER.warning(
+                        "Mesh %s: %d device(s) seen but none reachable through a "
+                        "connectable adapter/proxy",
+                        self.mesh_name,
+                        len(self._candidates),
+                    )
+                else:
+                    _LOGGER.warning(
+                        "Mesh %s: could not connect to any of %d candidate node(s); "
+                        "will keep retrying",
+                        self.mesh_name,
+                        len(candidates),
+                    )
             attempt += 1
-            if not self._candidates:
-                _LOGGER.debug("Mesh %s: no devices advertising yet", self.mesh_name)
             self._wake.clear()
             try:
                 await asyncio.wait_for(self._wake.wait(), delay)

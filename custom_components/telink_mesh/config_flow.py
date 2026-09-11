@@ -146,36 +146,52 @@ def _discovered_telink(hass: HomeAssistant) -> list[BluetoothServiceInfoBleak]:
 
 
 def _candidate_addresses(hass: HomeAssistant, mesh_name: str, preferred: str | None) -> list[str]:
+    """Addresses worth a login attempt for this mesh.
+
+    Only the device that triggered discovery (``preferred``) and devices that
+    advertise the exact mesh name are tried. We deliberately do NOT fall back to
+    every unnamed Telink device: many unrelated gadgets use Telink chips, and
+    probing them would connect to a neighbour's hardware and waste proxy slots.
+    """
     addresses: list[str] = []
     if preferred:
         addresses.append(preferred)
-    unnamed: list[str] = []
     for info in _discovered_telink(hass):
         if info.address in addresses:
             continue
-        name = advertised_mesh_name(info)
-        if name == mesh_name:
+        if advertised_mesh_name(info) == mesh_name:
             addresses.append(info.address)
-        elif name is None:
-            unnamed.append(info.address)
-    return addresses + unnamed
+    return addresses
 
 
 async def _async_try_login(hass: HomeAssistant, address: str, mesh_name: str, password: str) -> str | None:
     """Return an error key, or None when the credentials work."""
     device = bluetooth.async_ble_device_from_address(hass, address, connectable=True)
     if device is None:
+        _LOGGER.warning(
+            "Telink mesh '%s': %s is not reachable through any connectable "
+            "Bluetooth adapter or proxy",
+            mesh_name,
+            address,
+        )
         return "cannot_connect"
     connection = TelinkMeshConnection(mesh_name, password)
     try:
+        _LOGGER.info("Telink mesh '%s': trying to log in via %s", mesh_name, address)
         await connection.connect(device)
     except TelinkAuthError:
+        _LOGGER.warning(
+            "Telink mesh '%s': %s rejected the mesh name/password", mesh_name, address
+        )
         return "invalid_auth"
     except (TelinkError, BleakError, TimeoutError, asyncio.TimeoutError) as err:
-        _LOGGER.debug("Login test via %s failed: %s", address, err)
+        _LOGGER.warning(
+            "Telink mesh '%s': login via %s failed: %s", mesh_name, address, err
+        )
         return "cannot_connect"
     finally:
         await connection.disconnect()
+    _LOGGER.info("Telink mesh '%s': login via %s succeeded", mesh_name, address)
     return None
 
 
@@ -183,6 +199,12 @@ async def _async_validate(
     hass: HomeAssistant, mesh_name: str, password: str, preferred: str | None
 ) -> str | None:
     addresses = _candidate_addresses(hass, mesh_name, preferred)
+    _LOGGER.info(
+        "Telink mesh '%s': validating against %d candidate address(es): %s",
+        mesh_name,
+        len(addresses),
+        ", ".join(addresses) or "none",
+    )
     if not addresses:
         return "no_devices_found"
     error: str | None = "cannot_connect"
