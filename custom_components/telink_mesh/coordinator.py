@@ -183,6 +183,8 @@ class TelinkMeshCoordinator:
         data = await self._store.async_load()
         for mesh_id_str, item in ((data or {}).get("nodes") or {}).items():
             node = TelinkNode.from_storage(int(mesh_id_str), item)
+            if node.mac and node.mac.upper() == "00:00:00:00:00:00":
+                node.mac = None  # sanitize bad data persisted by older versions
             self.nodes[node.mesh_id] = node
             if node.mac:
                 self._known_macs.add(node.mac)
@@ -543,14 +545,20 @@ class TelinkMeshCoordinator:
         self._notify_listeners()
 
     def _match_known_mac(self, *variants: str) -> str | None:
+        """Return a reported MAC only if it matches a real, known address.
+
+        We never guess: an unknown or all-zero MAC returns None so that a node
+        is left without a Bluetooth connection rather than being given a bogus
+        (and possibly duplicate) address.
+        """
         known = {a.upper() for a in self._candidates} | {a.upper() for a in self._known_macs}
         if self._connection.address:
             known.add(self._connection.address.upper())
         for variant in variants:
-            if variant.upper() in known:
-                return variant.upper()
-        # Telink sends the MAC little-endian, so the first variant is the best guess.
-        return variants[0].upper() if variants else None
+            up = variant.upper()
+            if up != "00:00:00:00:00:00" and up in known:
+                return up
+        return None
 
     # -- commands -----------------------------------------------------------------------------------
 

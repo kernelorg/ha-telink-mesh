@@ -130,7 +130,8 @@ class TelinkNodeLight(_TelinkLightBase):
         entry_id = coordinator.entry.entry_id
         self._attr_unique_id = f"{entry_id}_{node.mesh_id}"
         self._attr_name = None
-        connections = {(CONNECTION_BLUETOOTH, node.mac)} if node.mac else set()
+        valid_mac = bool(node.mac) and node.mac != "00:00:00:00:00:00"
+        connections = {(CONNECTION_BLUETOOTH, node.mac)} if valid_mac else set()
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, f"{entry_id}_{node.mesh_id}")},
             connections=connections,

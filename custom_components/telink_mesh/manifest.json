@@ -19,5 +19,5 @@
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/jseglobalsolutions/ha-telink-mesh/issues",
   "requirements": ["bleak-retry-connector>=3.4.0"],
-  "version": "0.2.1"
+  "version": "0.2.2"
 }
