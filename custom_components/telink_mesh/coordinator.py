@@ -40,7 +40,6 @@ from .const import (
     DEFAULT_POLL_INTERVAL,
     DEFAULT_PROFILE,
     DEFAULT_WRITE_WITH_RESPONSE,
-    NODE_STALE_SECONDS,
     RECONNECT_DELAYS,
     SIGNAL_NEW_NODE,
     STORAGE_KEY,
@@ -374,13 +373,13 @@ class TelinkMeshCoordinator:
                     self._connection.address,
                     " (optimistic, no status notifications)" if self.optimistic else "",
                 )
-                if self.optimistic:
-                    # No status feedback will arrive, so make already-known
-                    # nodes controllable instead of leaving them unavailable.
-                    now = time.monotonic()
-                    for node in self.nodes.values():
-                        node.online = True
-                        node.last_seen = now
+                # A live mesh connection means every known node is reachable
+                # for commands, so mark them online. Status notifications (when
+                # available) then keep on/off, brightness and colour current.
+                now = time.monotonic()
+                for node in self.nodes.values():
+                    node.online = True
+                    node.last_seen = now
                 self._notify_listeners()
                 await self._post_connect()
                 continue
@@ -441,17 +440,11 @@ class TelinkMeshCoordinator:
         return True
 
     async def _async_poll(self, _now: datetime) -> None:
-        # Without status notifications there is nothing to go stale on; keep the
-        # nodes controllable as long as the mesh connection is up.
-        if not self.optimistic:
-            stale_before = time.monotonic() - NODE_STALE_SECONDS
-            changed = False
-            for node in self.nodes.values():
-                if node.online and node.last_seen and node.last_seen < stale_before:
-                    node.online = False
-                    changed = True
-            if changed:
-                self._notify_listeners()
+        # Node availability follows the mesh connection, not the status
+        # heartbeat: as long as the connected node relays for the mesh, every
+        # node is commandable. We therefore do NOT flip nodes offline when
+        # status reports lapse (that used to make lights vanish after a few
+        # minutes). Just keep polling for fresh state.
         if self._connection.connected:
             await self._try_send(ADDR_ALL, *self.profile.status_query())
 

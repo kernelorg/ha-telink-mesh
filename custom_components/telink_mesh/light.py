@@ -146,11 +146,10 @@ class TelinkNodeLight(_TelinkLightBase):
 
     @property
     def available(self) -> bool:
-        if not self.coordinator.connected:
-            return False
-        # Without status notifications we cannot know per-node online state, so
-        # follow the mesh connection instead of leaving the light unavailable.
-        return self.coordinator.optimistic or self._node.online
+        # Availability follows the mesh connection (like the "All lights"
+        # entity). The per-node online heartbeat only enriches state; gating
+        # availability on it made lights disappear when reports lapsed.
+        return self.coordinator.connected
 
     @property
     def is_on(self) -> bool:
