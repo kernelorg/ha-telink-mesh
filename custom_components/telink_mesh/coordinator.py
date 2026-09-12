@@ -74,6 +74,11 @@ MAX_CONNECT_CANDIDATES = 4
 COMMAND_GAP = 0.05
 REFRESH_AFTER_COMMAND = 2.0
 SAVE_DELAY = 10
+# Keep entities available (so the user can still send a command that triggers a
+# reconnect) for this long after the mesh link drops.
+AVAILABLE_GRACE = 180.0
+# How long a command waits for the link to come back before giving up.
+COMMAND_CONNECT_WAIT = 15.0
 
 
 @dataclass
@@ -164,6 +169,8 @@ class TelinkMeshCoordinator:
         self._known_macs: set[str] = set()
         self._listeners: set[Callable[[], None]] = set()
         self._wake = asyncio.Event()
+        self._connected_event = asyncio.Event()
+        self._last_connected = 0.0
         self._stopping = False
         self._unsub_bt: Callable[[], None] | None = None
         self._unsub_poll: Callable[[], None] | None = None
@@ -244,6 +251,20 @@ class TelinkMeshCoordinator:
     @property
     def connected(self) -> bool:
         return self._connection.connected
+
+    @property
+    def available(self) -> bool:
+        """Whether entities should be shown available.
+
+        True while connected, and briefly after a drop so the user can still
+        issue a command (which waits for the reconnect). Goes False only when
+        the link has been down past the grace window.
+        """
+        if self._connection.connected:
+            return True
+        if self._stopping or not self._last_connected:
+            return False
+        return (time.monotonic() - self._last_connected) < AVAILABLE_GRACE
 
     @property
     def connected_address(self) -> str | None:
@@ -377,6 +398,8 @@ class TelinkMeshCoordinator:
                 # for commands, so mark them online. Status notifications (when
                 # available) then keep on/off, brightness and colour current.
                 now = time.monotonic()
+                self._last_connected = now
+                self._connected_event.set()
                 for node in self.nodes.values():
                     node.online = True
                     node.last_seen = now
@@ -416,6 +439,7 @@ class TelinkMeshCoordinator:
     @callback
     def _handle_disconnect(self) -> None:
         self.connected_mesh_id = None
+        self._connected_event.clear()
         self._notify_listeners()
         self._wake.set()
 
@@ -446,6 +470,7 @@ class TelinkMeshCoordinator:
         # status reports lapse (that used to make lights vanish after a few
         # minutes). Just keep polling for fresh state.
         if self._connection.connected:
+            self._last_connected = time.monotonic()
             await self._try_send(ADDR_ALL, *self.profile.status_query())
 
     def _schedule_refresh(self, target: int) -> None:
@@ -531,10 +556,18 @@ class TelinkMeshCoordinator:
 
     async def async_send(self, target: int, opcode: int, params: bytes) -> None:
         if not self._connection.connected:
+            # Wake the connection loop and give it a moment to reconnect so a
+            # command issued right after a drop still lands (this is what makes
+            # pressing a light "revive" the mesh).
             self._wake.set()
-            raise HomeAssistantError(
-                f"Telink mesh '{self.mesh_name}' is not connected to any node"
-            )
+            try:
+                await asyncio.wait_for(
+                    self._connected_event.wait(), COMMAND_CONNECT_WAIT
+                )
+            except asyncio.TimeoutError:
+                raise HomeAssistantError(
+                    f"Telink mesh '{self.mesh_name}' is not connected to any node"
+                ) from None
         try:
             await self._connection.send(target, opcode, params)
         except TelinkConnectionError as err:

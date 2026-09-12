@@ -146,10 +146,10 @@ class TelinkNodeLight(_TelinkLightBase):
 
     @property
     def available(self) -> bool:
-        # Availability follows the mesh connection (like the "All lights"
-        # entity). The per-node online heartbeat only enriches state; gating
-        # availability on it made lights disappear when reports lapsed.
-        return self.coordinator.connected
+        # Availability follows the mesh connection, with a short grace during
+        # reconnects so a command can still trigger recovery. The per-node
+        # online heartbeat only enriches state.
+        return self.coordinator.available
 
     @property
     def is_on(self) -> bool:
@@ -198,7 +198,7 @@ class TelinkMeshAllLight(_TelinkLightBase):
 
     @property
     def available(self) -> bool:
-        return self.coordinator.connected
+        return self.coordinator.available
 
     def _online_nodes(self) -> list[TelinkNode]:
         return [n for n in self.coordinator.nodes.values() if n.online]
