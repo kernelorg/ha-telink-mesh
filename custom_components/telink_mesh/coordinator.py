@@ -245,21 +245,22 @@ class LampLink:
     async def _post_connect(self) -> None:
         now = dt_util.now()
         await self._try(
+            self.node.mesh_id,
             OP_TIME_SET,
             time_set_params(now.year, now.month, now.day, now.hour, now.minute, now.second),
         )
         await asyncio.sleep(COMMAND_GAP)
-        await self._try(*self.coordinator.profile.status_query())
+        await self._try(self.node.mesh_id, *self.coordinator.profile.status_query())
 
-    async def _try(self, opcode: int, params: bytes) -> bool:
+    async def _try(self, target: int, opcode: int, params: bytes) -> bool:
         try:
-            await self._conn.send(ADDR_ALL, opcode, params)
+            await self._conn.send(target, opcode, params)
         except TelinkConnectionError as err:
             _LOGGER.debug("Mesh %s: lamp %s send failed: %s", self.coordinator.mesh_name, self.node.mac, err)
             return False
         return True
 
-    async def async_send(self, opcode: int, params: bytes) -> None:
+    async def async_send(self, target: int, opcode: int, params: bytes) -> None:
         if not self._conn.connected:
             self._wake.set()
             try:
@@ -269,7 +270,7 @@ class LampLink:
                     f"Telink lamp {self.node.mac} is not connected"
                 ) from None
         try:
-            await self._conn.send(ADDR_ALL, opcode, params)
+            await self._conn.send(target, opcode, params)
         except TelinkConnectionError as err:
             self._wake.set()
             raise HomeAssistantError(f"Telink lamp {self.node.mac}: {err}") from err
@@ -282,7 +283,7 @@ class LampLink:
             self._refresh_handle = None
             if self._conn.connected:
                 self.coordinator.hass.async_create_task(
-                    self._try(*self.coordinator.profile.status_query())
+                    self._try(self.node.mesh_id, *self.coordinator.profile.status_query())
                 )
 
         self._refresh_handle = self.coordinator.hass.loop.call_later(
@@ -292,7 +293,7 @@ class LampLink:
     async def poll(self) -> None:
         if self._conn.connected:
             self._last_connected = time.monotonic()
-            await self._try(*self.coordinator.profile.status_query())
+            await self._try(self.node.mesh_id, *self.coordinator.profile.status_query())
 
     @callback
     def _on_disconnect(self) -> None:
@@ -512,6 +513,10 @@ class TelinkMeshCoordinator:
         errors: list[Exception] = []
         for link in links:
             node = link.node
+            # A specific lamp is addressed by its own mesh id so relaying lamps
+            # do not all react; "All lights" (mac is None) uses the broadcast
+            # address on every connection.
+            target = ADDR_ALL if mac is None else node.mesh_id
             level = brightness if brightness is not None else (node.brightness or 100)
             commands: list[tuple[int, bytes]] = []
             if not node.is_on or not node.online:
@@ -531,7 +536,7 @@ class TelinkMeshCoordinator:
                     for index, (opcode, params) in enumerate(commands):
                         if index:
                             await asyncio.sleep(COMMAND_GAP)
-                        await link.async_send(opcode, params)
+                        await link.async_send(target, opcode, params)
             except HomeAssistantError as err:
                 errors.append(err)
                 continue
@@ -555,9 +560,10 @@ class TelinkMeshCoordinator:
             raise HomeAssistantError(f"Telink mesh '{self.mesh_name}': no such lamp")
         errors: list[Exception] = []
         for link in links:
+            target = ADDR_ALL if mac is None else link.node.mesh_id
             try:
                 async with link._command_lock:
-                    await link.async_send(*self.profile.power(False))
+                    await link.async_send(target, *self.profile.power(False))
             except HomeAssistantError as err:
                 errors.append(err)
                 continue
