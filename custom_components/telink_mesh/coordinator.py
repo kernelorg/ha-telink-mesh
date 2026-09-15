@@ -1,16 +1,22 @@
-"""Mesh coordinator: keeps one BLE connection to the mesh and tracks nodes."""
+"""Mesh coordinator: one direct BLE connection per lamp.
+
+Lamps of one Telink mesh share a mesh name and password but do not always relay
+for each other (they may be in different rooms). So instead of connecting to a
+single node and relying on mesh relay, this coordinator keeps a direct
+connection to every lamp it discovers and writes each command straight to that
+lamp's own GATT link (broadcast address over a dedicated connection). The
+"All lights" entity fans a command out to every connection.
+"""
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 import logging
 import time
 from typing import Any
-
-from bleak.backends.device import BLEDevice
 
 from homeassistant.components import bluetooth
 from homeassistant.components.bluetooth import (
@@ -48,11 +54,7 @@ from .const import (
 from .mesh import TelinkAuthError, TelinkConnectionError, TelinkMeshConnection
 from .protocol import (
     ADDR_ALL,
-    ADDR_CONNECTED,
-    ADDR_GROUP_BASE,
     ADV_SERVICE_UUID,
-    OP_ADDRESS_EDIT,
-    OP_ADDRESS_REPORT,
     OP_ONLINE_STATUS,
     OP_STATUS_REPORT,
     OP_TIME_SET,
@@ -60,8 +62,6 @@ from .protocol import (
     Notification,
     TelinkProtocolError,
     get_profile,
-    parse_address_report,
-    parse_manufacturer_data,
     parse_online_status,
     parse_status_report,
     time_set_params,
@@ -70,23 +70,19 @@ from .protocol import (
 
 _LOGGER = logging.getLogger(__name__)
 
-MAX_CONNECT_CANDIDATES = 4
 COMMAND_GAP = 0.05
 REFRESH_AFTER_COMMAND = 2.0
 SAVE_DELAY = 10
-# Keep entities available (so the user can still send a command that triggers a
-# reconnect) for this long after the mesh link drops.
 AVAILABLE_GRACE = 180.0
-# How long a command waits for the link to come back before giving up.
 COMMAND_CONNECT_WAIT = 15.0
 
 
 @dataclass
 class TelinkNode:
-    """State of one mesh node (a lamp)."""
+    """State of one lamp."""
 
+    mac: str
     mesh_id: int
-    mac: str | None = None
     name: str | None = None
     is_on: bool = False
     brightness: int = 0  # 0..100
@@ -95,20 +91,21 @@ class TelinkNode:
     online: bool = False
     last_seen: float = 0.0
     rssi: int | None = None
-    advertised_product: int | None = None
-    extra: dict[str, Any] = field(default_factory=dict)
 
     def to_storage(self) -> dict[str, Any]:
-        return {"mac": self.mac, "name": self.name, "product": self.advertised_product}
+        return {"mac": self.mac, "mesh_id": self.mesh_id, "name": self.name}
 
     @classmethod
-    def from_storage(cls, mesh_id: int, data: dict[str, Any]) -> TelinkNode:
-        return cls(
-            mesh_id=mesh_id,
-            mac=data.get("mac"),
-            name=data.get("name"),
-            advertised_product=data.get("product"),
-        )
+    def from_storage(cls, data: dict[str, Any]) -> TelinkNode | None:
+        mac = data.get("mac")
+        if not mac or mac.upper() == "00:00:00:00:00:00":
+            return None
+        return cls(mac=mac.upper(), mesh_id=int(data.get("mesh_id", mesh_id_from_mac(mac))), name=data.get("name"))
+
+
+def mesh_id_from_mac(mac: str) -> int:
+    """Telink lamps use the last MAC octet as their mesh id."""
+    return int(mac.split(":")[-1], 16)
 
 
 def is_telink_advertisement(service_info: BluetoothServiceInfoBleak) -> bool:
@@ -127,67 +124,225 @@ def advertised_mesh_name(service_info: BluetoothServiceInfoBleak) -> str | None:
     return name
 
 
+class LampLink:
+    """Owns the BLE connection to one lamp and drives it directly."""
+
+    def __init__(self, coordinator: TelinkMeshCoordinator, node: TelinkNode) -> None:
+        self.coordinator = coordinator
+        self.node = node
+        self._conn = TelinkMeshConnection(
+            coordinator.mesh_name,
+            coordinator.password,
+            notification_callback=self._on_notification,
+            disconnected_callback=self._on_disconnect,
+            write_with_response=coordinator.write_with_response,
+        )
+        self._wake = asyncio.Event()
+        self._connected_event = asyncio.Event()
+        self._last_connected = 0.0
+        self._stopping = False
+        self._command_lock = asyncio.Lock()
+        self._refresh_handle: asyncio.TimerHandle | None = None
+
+    def start(self) -> None:
+        self.coordinator.entry.async_create_background_task(
+            self.coordinator.hass,
+            self._loop(),
+            name=f"telink_mesh {self.coordinator.mesh_name} {self.node.mac}",
+        )
+
+    async def stop(self) -> None:
+        self._stopping = True
+        self._wake.set()
+        if self._refresh_handle:
+            self._refresh_handle.cancel()
+            self._refresh_handle = None
+        await self._conn.disconnect()
+
+    @property
+    def connected(self) -> bool:
+        return self._conn.connected
+
+    @property
+    def notifications_enabled(self) -> bool:
+        return self._conn.notifications_enabled
+
+    @property
+    def address(self) -> str | None:
+        return self._conn.address
+
+    @property
+    def available(self) -> bool:
+        if self._conn.connected:
+            return True
+        if self._stopping or not self._last_connected:
+            return False
+        return (time.monotonic() - self._last_connected) < AVAILABLE_GRACE
+
+    def poke(self, rssi: int | None) -> None:
+        if rssi is not None:
+            self.node.rssi = rssi
+        if not self._conn.connected:
+            self._wake.set()
+
+    async def _loop(self) -> None:
+        attempt = 0
+        while not self._stopping:
+            if self._conn.connected:
+                self._wake.clear()
+                await self._wake.wait()
+                continue
+
+            device = bluetooth.async_ble_device_from_address(
+                self.coordinator.hass, self.node.mac, connectable=True
+            )
+            if device is not None:
+                try:
+                    await self._conn.connect(device)
+                except TelinkAuthError:
+                    _LOGGER.error(
+                        "Mesh %s: lamp %s rejected the mesh name/password",
+                        self.coordinator.mesh_name,
+                        self.node.mac,
+                    )
+                    self.coordinator.auth_failed = True
+                    self.coordinator.entry.async_start_reauth(self.coordinator.hass)
+                    return
+                except TelinkConnectionError as err:
+                    _LOGGER.log(
+                        logging.WARNING if attempt == 0 else logging.DEBUG,
+                        "Mesh %s: could not connect to lamp %s: %s",
+                        self.coordinator.mesh_name,
+                        self.node.mac,
+                        err,
+                    )
+                else:
+                    attempt = 0
+                    now = time.monotonic()
+                    self._last_connected = now
+                    self._connected_event.set()
+                    self.node.online = True
+                    self.node.last_seen = now
+                    _LOGGER.info(
+                        "Mesh %s: connected to lamp %s (0x%02X)%s",
+                        self.coordinator.mesh_name,
+                        self.node.mac,
+                        self.node.mesh_id,
+                        "" if self._conn.notifications_enabled else " (optimistic)",
+                    )
+                    self.coordinator.notify_listeners()
+                    await self._post_connect()
+                    continue
+
+            delay = RECONNECT_DELAYS[min(attempt, len(RECONNECT_DELAYS) - 1)]
+            attempt += 1
+            self._wake.clear()
+            try:
+                await asyncio.wait_for(self._wake.wait(), delay)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _post_connect(self) -> None:
+        now = dt_util.now()
+        await self._try(
+            OP_TIME_SET,
+            time_set_params(now.year, now.month, now.day, now.hour, now.minute, now.second),
+        )
+        await asyncio.sleep(COMMAND_GAP)
+        await self._try(*self.coordinator.profile.status_query())
+
+    async def _try(self, opcode: int, params: bytes) -> bool:
+        try:
+            await self._conn.send(ADDR_ALL, opcode, params)
+        except TelinkConnectionError as err:
+            _LOGGER.debug("Mesh %s: lamp %s send failed: %s", self.coordinator.mesh_name, self.node.mac, err)
+            return False
+        return True
+
+    async def async_send(self, opcode: int, params: bytes) -> None:
+        if not self._conn.connected:
+            self._wake.set()
+            try:
+                await asyncio.wait_for(self._connected_event.wait(), COMMAND_CONNECT_WAIT)
+            except asyncio.TimeoutError:
+                raise HomeAssistantError(
+                    f"Telink lamp {self.node.mac} is not connected"
+                ) from None
+        try:
+            await self._conn.send(ADDR_ALL, opcode, params)
+        except TelinkConnectionError as err:
+            self._wake.set()
+            raise HomeAssistantError(f"Telink lamp {self.node.mac}: {err}") from err
+
+    def schedule_refresh(self) -> None:
+        if self._refresh_handle:
+            self._refresh_handle.cancel()
+
+        def _fire() -> None:
+            self._refresh_handle = None
+            if self._conn.connected:
+                self.coordinator.hass.async_create_task(
+                    self._try(*self.coordinator.profile.status_query())
+                )
+
+        self._refresh_handle = self.coordinator.hass.loop.call_later(
+            REFRESH_AFTER_COMMAND, _fire
+        )
+
+    async def poll(self) -> None:
+        if self._conn.connected:
+            self._last_connected = time.monotonic()
+            await self._try(*self.coordinator.profile.status_query())
+
+    @callback
+    def _on_disconnect(self) -> None:
+        self._connected_event.clear()
+        self.coordinator.notify_listeners()
+        self._wake.set()
+
+    @callback
+    def _on_notification(self, note: Notification) -> None:
+        self.coordinator.handle_notification(self.node, note)
+
+
 class TelinkMeshCoordinator:
-    """Owns the connection to a mesh and the list of its nodes."""
+    """Manages a pool of per-lamp connections for one mesh."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
         self.entry = entry
         options = {**entry.data, **entry.options}
         self.mesh_name: str = entry.data[CONF_MESH_NAME]
-        self._password: str = entry.data[CONF_MESH_PASSWORD]
+        self.password: str = entry.data[CONF_MESH_PASSWORD]
         self.profile = get_profile(options.get(CONF_PROFILE, DEFAULT_PROFILE))
         self.color_mode: str = options.get(CONF_COLOR_MODE, DEFAULT_COLOR_MODE)
-        # White colour-temperature bounds: use the per-entry override when set,
-        # otherwise the profile's defaults.
         self.color_temp_min = int(options.get(CONF_COLOR_TEMP_MIN) or self.profile.min_kelvin)
         self.color_temp_max = int(options.get(CONF_COLOR_TEMP_MAX) or self.profile.max_kelvin)
         if self.color_temp_max <= self.color_temp_min:
             self.color_temp_min = self.profile.min_kelvin
             self.color_temp_max = self.profile.max_kelvin
-        self._poll_interval = int(options.get(CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL))
-        self._connection = TelinkMeshConnection(
-            self.mesh_name,
-            self._password,
-            notification_callback=self._handle_notification,
-            disconnected_callback=self._handle_disconnect,
-            write_with_response=bool(
-                options.get(CONF_WRITE_WITH_RESPONSE, DEFAULT_WRITE_WITH_RESPONSE)
-            ),
+        self.write_with_response = bool(
+            options.get(CONF_WRITE_WITH_RESPONSE, DEFAULT_WRITE_WITH_RESPONSE)
         )
-        self.nodes: dict[int, TelinkNode] = {}
-        self.connected_mesh_id: int | None = None
+        self._poll_interval = int(options.get(CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL))
         self.auth_failed = False
-        # True when the connected node would not give us status notifications;
-        # in that case entity state is optimistic and availability follows the
-        # mesh connection instead of per-node online reports.
-        self.optimistic = False
+        self.nodes: dict[str, TelinkNode] = {}  # keyed by MAC
+        self.links: dict[str, LampLink] = {}  # keyed by MAC
         self._store: Store[dict[str, Any]] = Store(
             hass, STORAGE_VERSION, f"{STORAGE_KEY}.{entry.entry_id}"
         )
-        self._candidates: dict[str, float] = {}
-        self._known_macs: set[str] = set()
         self._listeners: set[Callable[[], None]] = set()
-        self._wake = asyncio.Event()
-        self._connected_event = asyncio.Event()
-        self._last_connected = 0.0
-        self._stopping = False
         self._unsub_bt: Callable[[], None] | None = None
         self._unsub_poll: Callable[[], None] | None = None
-        self._refresh_handle: asyncio.TimerHandle | None = None
-        self._command_lock = asyncio.Lock()
 
     # -- lifecycle ------------------------------------------------------------------
 
     async def async_setup(self) -> None:
         data = await self._store.async_load()
-        for mesh_id_str, item in ((data or {}).get("nodes") or {}).items():
-            node = TelinkNode.from_storage(int(mesh_id_str), item)
-            if node.mac and node.mac.upper() == "00:00:00:00:00:00":
-                node.mac = None  # sanitize bad data persisted by older versions
-            self.nodes[node.mesh_id] = node
-            if node.mac:
-                self._known_macs.add(node.mac)
+        for item in ((data or {}).get("nodes") or {}).values():
+            node = TelinkNode.from_storage(item)
+            if node is not None:
+                self._add_lamp(node)
 
         unsubs = [
             bluetooth.async_register_callback(
@@ -214,26 +369,20 @@ class TelinkMeshCoordinator:
         self._unsub_poll = async_track_time_interval(
             self.hass, self._async_poll, timedelta(seconds=self._poll_interval)
         )
-        self.entry.async_create_background_task(
-            self.hass, self._connection_loop(), name=f"telink_mesh {self.mesh_name}"
-        )
+        for link in self.links.values():
+            link.start()
 
     async def async_shutdown(self) -> None:
-        self._stopping = True
-        self._wake.set()
         if self._unsub_bt:
             self._unsub_bt()
             self._unsub_bt = None
         if self._unsub_poll:
             self._unsub_poll()
             self._unsub_poll = None
-        if self._refresh_handle:
-            self._refresh_handle.cancel()
-            self._refresh_handle = None
-        await self._connection.disconnect()
+        await asyncio.gather(*(link.stop() for link in self.links.values()))
         await self._store.async_save(self._storage_data())
 
-    # -- listeners -----------------------------------------------------------------------
+    # -- listeners ------------------------------------------------------------------
 
     @callback
     def async_add_listener(self, update_callback: Callable[[], None]) -> Callable[[], None]:
@@ -246,62 +395,38 @@ class TelinkMeshCoordinator:
         return _remove
 
     @callback
-    def _notify_listeners(self) -> None:
+    def notify_listeners(self) -> None:
         for update_callback in list(self._listeners):
             update_callback()
 
     @property
-    def connected(self) -> bool:
-        return self._connection.connected
+    def any_available(self) -> bool:
+        return any(link.available for link in self.links.values())
 
-    @property
-    def available(self) -> bool:
-        """Whether entities should be shown available.
+    def node_available(self, mac: str) -> bool:
+        link = self.links.get(mac)
+        return bool(link and link.available)
 
-        True while connected, and briefly after a drop so the user can still
-        issue a command (which waits for the reconnect). Goes False only when
-        the link has been down past the grace window.
-        """
-        if self._connection.connected:
-            return True
-        if self._stopping or not self._last_connected:
-            return False
-        return (time.monotonic() - self._last_connected) < AVAILABLE_GRACE
+    def connected_address(self, mac: str) -> str | None:
+        link = self.links.get(mac)
+        return link.address if link and link.connected else None
 
-    @property
-    def connected_address(self) -> str | None:
-        return self._connection.address if self._connection.connected else None
-
-    @property
-    def candidate_addresses(self) -> list[str]:
-        return list(self._candidates)
-
-    # -- node registry ---------------------------------------------------------------------
-
-    def _get_or_create_node(self, mesh_id: int) -> TelinkNode:
-        node = self.nodes.get(mesh_id)
-        if node is None:
-            node = TelinkNode(mesh_id=mesh_id)
-            self.nodes[mesh_id] = node
-            _LOGGER.info("Mesh %s: discovered node 0x%02x", self.mesh_name, mesh_id)
-            self._schedule_save()
-            async_dispatcher_send(self.hass, f"{SIGNAL_NEW_NODE}_{self.entry.entry_id}", node)
-        return node
-
-    @staticmethod
-    def _is_node_address(mesh_id: int) -> bool:
-        return 0 < mesh_id < ADDR_GROUP_BASE
+    # -- discovery ------------------------------------------------------------------
 
     def _storage_data(self) -> dict[str, Any]:
-        return {"nodes": {str(n.mesh_id): n.to_storage() for n in self.nodes.values()}}
+        return {"nodes": {n.mac: n.to_storage() for n in self.nodes.values()}}
 
     def _schedule_save(self) -> None:
         self._store.async_delay_save(self._storage_data, SAVE_DELAY)
 
-    # -- discovery ----------------------------------------------------------------------------
+    def _add_lamp(self, node: TelinkNode) -> LampLink:
+        self.nodes[node.mac] = node
+        link = LampLink(self, node)
+        self.links[node.mac] = link
+        return link
 
     def _is_member(self, service_info: BluetoothServiceInfoBleak) -> bool:
-        if service_info.address in self._known_macs:
+        if service_info.address.upper() in self.nodes:
             return True
         if not is_telink_advertisement(service_info):
             return False
@@ -313,206 +438,38 @@ class TelinkMeshCoordinator:
     ) -> None:
         if not self._is_member(service_info):
             return
-        address = service_info.address
-        first_time = address not in self._candidates
-        self._candidates[address] = time.monotonic()
+        mac = service_info.address.upper()
+        link = self.links.get(mac)
+        if link is None:
+            node = TelinkNode(mac=mac, mesh_id=mesh_id_from_mac(mac))
+            _LOGGER.info("Mesh %s: discovered lamp %s (0x%02X)", self.mesh_name, mac, node.mesh_id)
+            link = self._add_lamp(node)
+            self._schedule_save()
+            link.start()
+            async_dispatcher_send(
+                self.hass, f"{SIGNAL_NEW_NODE}_{self.entry.entry_id}", node
+            )
+        link.poke(service_info.rssi)
 
-        # Advertisements are only trustworthy for RSSI of nodes we already know
-        # by MAC. The manufacturer-data layout varies between Telink vendors, so
-        # we do NOT invent nodes (or mesh ids) from it; nodes come from the
-        # decrypted status/address reports and from persisted storage. This
-        # keeps a single spurious entity from appearing per vendor quirk.
-        payload = service_info.manufacturer_data.get(TELINK_MANUFACTURER_ID)
-        adv = parse_manufacturer_data(payload) if payload else None
-        for node in self.nodes.values():
-            if node.mac == address:
-                node.rssi = service_info.rssi
-                if adv and adv.product_uuid is not None:
-                    node.advertised_product = adv.product_uuid
-                break
-
-        if first_time:
-            _LOGGER.debug("Mesh %s: candidate %s (rssi %s)", self.mesh_name, address, service_info.rssi)
-        if not self._connection.connected:
-            self._wake.set()
-
-    def _sorted_candidates(self) -> list[BLEDevice]:
-        scored: list[tuple[int, BLEDevice]] = []
-        for address in list(self._candidates):
-            device = bluetooth.async_ble_device_from_address(self.hass, address, connectable=True)
-            if device is None:
-                continue
-            info = bluetooth.async_last_service_info(self.hass, address, connectable=True)
-            scored.append((info.rssi if info and info.rssi is not None else -127, device))
-        scored.sort(key=lambda item: item[0], reverse=True)
-        return [device for _, device in scored]
-
-    # -- connection management -------------------------------------------------------
-
-    async def _connection_loop(self) -> None:
-        attempt = 0
-        while not self._stopping:
-            if self._connection.connected:
-                self._wake.clear()
-                await self._wake.wait()
-                continue
-
-            connected = False
-            candidates = self._sorted_candidates()[:MAX_CONNECT_CANDIDATES]
-            for device in candidates:
-                if self._stopping:
-                    return
-                try:
-                    _LOGGER.debug("Mesh %s: connecting to %s", self.mesh_name, device.address)
-                    await self._connection.connect(device)
-                except TelinkAuthError:
-                    _LOGGER.error(
-                        "Mesh %s: %s rejected the mesh name/password", self.mesh_name, device.address
-                    )
-                    self.auth_failed = True
-                    self._notify_listeners()
-                    self.entry.async_start_reauth(self.hass)
-                    return
-                except TelinkConnectionError as err:
-                    _LOGGER.log(
-                        # First failure of a cycle is worth a warning; later
-                        # retries stay at debug to avoid flooding the log.
-                        logging.WARNING if attempt == 0 else logging.DEBUG,
-                        "Mesh %s: could not connect to %s: %s",
-                        self.mesh_name,
-                        device.address,
-                        err,
-                    )
-                    continue
-                connected = True
-                break
-
-            if connected:
-                attempt = 0
-                self.optimistic = not self._connection.notifications_enabled
-                _LOGGER.info(
-                    "Mesh %s: connected through %s%s",
-                    self.mesh_name,
-                    self._connection.address,
-                    " (optimistic, no status notifications)" if self.optimistic else "",
-                )
-                # A live mesh connection means every known node is reachable
-                # for commands, so mark them online. Status notifications (when
-                # available) then keep on/off, brightness and colour current.
-                now = time.monotonic()
-                self._last_connected = now
-                self._connected_event.set()
-                for node in self.nodes.values():
-                    node.online = True
-                    node.last_seen = now
-                self._notify_listeners()
-                await self._post_connect()
-                continue
-
-            delay = RECONNECT_DELAYS[min(attempt, len(RECONNECT_DELAYS) - 1)]
-            if attempt == 0:
-                if not self._candidates:
-                    _LOGGER.warning(
-                        "Mesh %s: no device advertising this mesh is in range of a "
-                        "connectable Bluetooth adapter or proxy yet",
-                        self.mesh_name,
-                    )
-                elif not candidates:
-                    _LOGGER.warning(
-                        "Mesh %s: %d device(s) seen but none reachable through a "
-                        "connectable adapter/proxy",
-                        self.mesh_name,
-                        len(self._candidates),
-                    )
-                else:
-                    _LOGGER.warning(
-                        "Mesh %s: could not connect to any of %d candidate node(s); "
-                        "will keep retrying",
-                        self.mesh_name,
-                        len(candidates),
-                    )
-            attempt += 1
-            self._wake.clear()
-            try:
-                await asyncio.wait_for(self._wake.wait(), delay)
-            except asyncio.TimeoutError:
-                pass
+    # -- notifications --------------------------------------------------------------
 
     @callback
-    def _handle_disconnect(self) -> None:
-        self.connected_mesh_id = None
-        self._connected_event.clear()
-        self._notify_listeners()
-        self._wake.set()
-
-    async def _post_connect(self) -> None:
-        now: datetime = dt_util.now()
-        await self._try_send(
-            ADDR_ALL,
-            OP_TIME_SET,
-            time_set_params(now.year, now.month, now.day, now.hour, now.minute, now.second),
-        )
-        await asyncio.sleep(COMMAND_GAP)
-        await self._try_send(ADDR_CONNECTED, OP_ADDRESS_EDIT, b"\xff\xff")
-        await asyncio.sleep(COMMAND_GAP)
-        await self._try_send(ADDR_ALL, *self.profile.status_query())
-
-    async def _try_send(self, target: int, opcode: int, params: bytes) -> bool:
-        try:
-            await self._connection.send(target, opcode, params)
-        except TelinkConnectionError as err:
-            _LOGGER.debug("Mesh %s: send failed: %s", self.mesh_name, err)
-            return False
-        return True
-
-    async def _async_poll(self, _now: datetime) -> None:
-        # Node availability follows the mesh connection, not the status
-        # heartbeat: as long as the connected node relays for the mesh, every
-        # node is commandable. We therefore do NOT flip nodes offline when
-        # status reports lapse (that used to make lights vanish after a few
-        # minutes). Just keep polling for fresh state.
-        if self._connection.connected:
-            self._last_connected = time.monotonic()
-            await self._try_send(ADDR_ALL, *self.profile.status_query())
-
-    def _schedule_refresh(self, target: int) -> None:
-        if self._refresh_handle:
-            self._refresh_handle.cancel()
-
-        def _fire() -> None:
-            self._refresh_handle = None
-            if self._connection.connected:
-                self.hass.async_create_task(
-                    self._try_send(target, *self.profile.status_query())
-                )
-
-        self._refresh_handle = self.hass.loop.call_later(REFRESH_AFTER_COMMAND, _fire)
-
-    # -- notifications ------------------------------------------------------------------------
-
-    @callback
-    def _handle_notification(self, note: Notification) -> None:
+    def handle_notification(self, node: TelinkNode, note: Notification) -> None:
         now = time.monotonic()
         try:
             if note.opcode == OP_ONLINE_STATUS:
                 for entry in parse_online_status(note.params):
-                    if not self._is_node_address(entry.mesh_id):
+                    if entry.mesh_id != node.mesh_id:
                         continue
-                    node = self._get_or_create_node(entry.mesh_id)
-                    node.online = entry.online
+                    node.online = True
                     node.is_on = entry.is_on
                     if entry.brightness:
                         node.brightness = entry.brightness
                     node.last_seen = now
             elif note.opcode == OP_STATUS_REPORT:
-                if not self._is_node_address(note.source):
-                    return
                 if not self.profile.trust_status_report:
-                    # This firmware's 0xDB layout is unknown; on/off and
-                    # brightness come from the online-status report instead.
                     return
                 report = parse_status_report(note.params)
-                node = self._get_or_create_node(note.source)
                 node.online = True
                 node.last_seen = now
                 if report.brightness:
@@ -523,106 +480,61 @@ class TelinkMeshCoordinator:
                 elif report.is_white:
                     node.color_temp_kelvin = yw_to_kelvin(report.y, report.w)
                     node.rgb = None
-            elif note.opcode == OP_ADDRESS_REPORT:
-                report = parse_address_report(note.params)
-                if not self._is_node_address(report.mesh_id):
-                    return
-                node = self._get_or_create_node(report.mesh_id)
-                node.online = True
-                node.last_seen = now
-                mac = self._match_known_mac(report.mac, report.mac_reversed)
-                if mac and node.mac != mac:
-                    node.mac = mac
-                    self._known_macs.add(mac)
-                    self._schedule_save()
-                if mac and mac == self._connection.address:
-                    self.connected_mesh_id = report.mesh_id
             else:
                 return
         except TelinkProtocolError as err:
             _LOGGER.debug("Mesh %s: %s", self.mesh_name, err)
             return
-        self._notify_listeners()
+        self.notify_listeners()
 
-    def _match_known_mac(self, *variants: str) -> str | None:
-        """Return a reported MAC only if it matches a real, known address.
+    async def _async_poll(self, _now: datetime) -> None:
+        await asyncio.gather(*(link.poll() for link in self.links.values()))
 
-        We never guess: an unknown or all-zero MAC returns None so that a node
-        is left without a Bluetooth connection rather than being given a bogus
-        (and possibly duplicate) address.
-        """
-        known = {a.upper() for a in self._candidates} | {a.upper() for a in self._known_macs}
-        if self._connection.address:
-            known.add(self._connection.address.upper())
-        for variant in variants:
-            up = variant.upper()
-            if up != "00:00:00:00:00:00" and up in known:
-                return up
-        return None
+    # -- commands -------------------------------------------------------------------
 
-    # -- commands -----------------------------------------------------------------------------------
-
-    async def async_send(self, target: int, opcode: int, params: bytes) -> None:
-        if not self._connection.connected:
-            # Wake the connection loop and give it a moment to reconnect so a
-            # command issued right after a drop still lands (this is what makes
-            # pressing a light "revive" the mesh).
-            self._wake.set()
-            try:
-                await asyncio.wait_for(
-                    self._connected_event.wait(), COMMAND_CONNECT_WAIT
-                )
-            except asyncio.TimeoutError:
-                raise HomeAssistantError(
-                    f"Telink mesh '{self.mesh_name}' is not connected to any node"
-                ) from None
-        try:
-            await self._connection.send(target, opcode, params)
-        except TelinkConnectionError as err:
-            self._wake.set()
-            raise HomeAssistantError(f"Telink mesh '{self.mesh_name}': {err}") from err
-
-    def _targets(self, target: int) -> list[TelinkNode]:
-        if target == ADDR_ALL:
-            return list(self.nodes.values())
-        node = self.nodes.get(target)
-        return [node] if node else []
+    def _target_links(self, mac: str | None) -> list[LampLink]:
+        if mac is None:
+            return list(self.links.values())
+        link = self.links.get(mac)
+        return [link] if link else []
 
     async def async_turn_on(
         self,
-        target: int,
+        mac: str | None,
         *,
         brightness: int | None = None,
         rgb: tuple[int, int, int] | None = None,
         color_temp_kelvin: int | None = None,
     ) -> None:
-        """Turn a node (or every node with ADDR_ALL) on and apply attributes."""
-        nodes = self._targets(target)
-        current = nodes[0] if len(nodes) == 1 else None
-        level = brightness if brightness is not None else (
-            current.brightness if current and current.brightness else 100
-        )
-        commands: list[tuple[int, bytes]] = []
-        if current is None or not current.is_on or not current.online:
-            commands.append(self.profile.power(True))
-        if rgb is not None:
-            commands.append(self.profile.rgb(*rgb, level))
-        elif color_temp_kelvin is not None:
-            commands.append(
-                self.profile.color_temp(
-                    color_temp_kelvin, level, self.color_temp_min, self.color_temp_max
+        links = self._target_links(mac)
+        if not links:
+            raise HomeAssistantError(f"Telink mesh '{self.mesh_name}': no such lamp")
+        errors: list[Exception] = []
+        for link in links:
+            node = link.node
+            level = brightness if brightness is not None else (node.brightness or 100)
+            commands: list[tuple[int, bytes]] = []
+            if not node.is_on or not node.online:
+                commands.append(self.profile.power(True))
+            if rgb is not None:
+                commands.append(self.profile.rgb(*rgb, level))
+            elif color_temp_kelvin is not None:
+                commands.append(
+                    self.profile.color_temp(
+                        color_temp_kelvin, level, self.color_temp_min, self.color_temp_max
+                    )
                 )
-            )
-        elif brightness is not None:
-            commands.append(self.profile.brightness(level))
-
-        async with self._command_lock:
-            for index, (opcode, params) in enumerate(commands):
-                if index:
-                    await asyncio.sleep(COMMAND_GAP)
-                await self.async_send(target, opcode, params)
-
-        for node in nodes:
+            elif brightness is not None:
+                commands.append(self.profile.brightness(level))
+            try:
+                async with link._command_lock:
+                    for index, (opcode, params) in enumerate(commands):
+                        if index:
+                            await asyncio.sleep(COMMAND_GAP)
+                        await link.async_send(opcode, params)
+            except HomeAssistantError as err:
+                errors.append(err)
+                continue
             node.is_on = True
             if brightness is not None or rgb is not None or color_temp_kelvin is not None:
                 node.brightness = level
@@ -632,47 +544,49 @@ class TelinkMeshCoordinator:
             elif color_temp_kelvin is not None:
                 node.color_temp_kelvin = color_temp_kelvin
                 node.rgb = None
-        self._notify_listeners()
-        self._schedule_refresh(target)
+            link.schedule_refresh()
+        self.notify_listeners()
+        if errors and len(errors) == len(links):
+            raise errors[0]
 
-    async def async_turn_off(self, target: int) -> None:
-        async with self._command_lock:
-            await self.async_send(target, *self.profile.power(False))
-        for node in self._targets(target):
-            node.is_on = False
-        self._notify_listeners()
-        self._schedule_refresh(target)
-
-    async def async_request_refresh(self, target: int = ADDR_ALL) -> None:
-        if self._connection.connected:
-            await self._try_send(target, *self.profile.status_query())
+    async def async_turn_off(self, mac: str | None) -> None:
+        links = self._target_links(mac)
+        if not links:
+            raise HomeAssistantError(f"Telink mesh '{self.mesh_name}': no such lamp")
+        errors: list[Exception] = []
+        for link in links:
+            try:
+                async with link._command_lock:
+                    await link.async_send(*self.profile.power(False))
+            except HomeAssistantError as err:
+                errors.append(err)
+                continue
+            link.node.is_on = False
+            link.schedule_refresh()
+        self.notify_listeners()
+        if errors and len(errors) == len(links):
+            raise errors[0]
 
     def diagnostics(self) -> dict[str, Any]:
         return {
             "mesh_name": self.mesh_name,
             "profile": self.profile.key,
             "color_mode": self.color_mode,
-            "connected": self.connected,
-            "connected_address": self.connected_address,
-            "connected_mesh_id": self.connected_mesh_id,
-            "auth_failed": self.auth_failed,
-            "optimistic": self.optimistic,
-            "notifications_enabled": self._connection.notifications_enabled,
             "color_temp_min": self.color_temp_min,
             "color_temp_max": self.color_temp_max,
-            "candidates": sorted(self._candidates),
-            "nodes": [
+            "auth_failed": self.auth_failed,
+            "lamps": [
                 {
-                    "mesh_id": n.mesh_id,
                     "mac": n.mac,
-                    "online": n.online,
+                    "mesh_id": n.mesh_id,
+                    "connected": self.links[n.mac].connected,
+                    "available": self.links[n.mac].available,
+                    "notifications": self.links[n.mac].notifications_enabled,
                     "is_on": n.is_on,
                     "brightness": n.brightness,
                     "rgb": n.rgb,
                     "color_temp_kelvin": n.color_temp_kelvin,
                     "rssi": n.rssi,
-                    "product": n.advertised_product,
-                    "seen_seconds_ago": round(time.monotonic() - n.last_seen) if n.last_seen else None,
                 }
                 for n in sorted(self.nodes.values(), key=lambda n: n.mesh_id)
             ],

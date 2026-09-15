@@ -1,4 +1,4 @@
-"""Light entities for Telink mesh nodes."""
+"""Light entities for Telink mesh lamps (one direct connection per lamp)."""
 
 from __future__ import annotations
 
@@ -28,7 +28,6 @@ from .const import (
     SIGNAL_NEW_NODE,
 )
 from .coordinator import TelinkMeshCoordinator, TelinkNode
-from .protocol import ADDR_ALL
 
 _SUPPORTED: dict[str, set[ColorMode]] = {
     COLOR_MODE_RGB_CT: {ColorMode.RGB, ColorMode.COLOR_TEMP},
@@ -45,18 +44,18 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: TelinkMeshCoordinator = entry.runtime_data
-    known: set[int] = set()
+    known: set[str] = set()
 
     @callback
     def _add_node(node: TelinkNode) -> None:
-        if node.mesh_id in known:
+        if node.mac in known:
             return
-        known.add(node.mesh_id)
+        known.add(node.mac)
         async_add_entities([TelinkNodeLight(coordinator, node)])
 
     entities: list[LightEntity] = [TelinkMeshAllLight(coordinator)]
     for node in list(coordinator.nodes.values()):
-        known.add(node.mesh_id)
+        known.add(node.mac)
         entities.append(TelinkNodeLight(coordinator, node))
     async_add_entities(entities)
 
@@ -74,7 +73,7 @@ def _to_mesh_brightness(value: int) -> int:
 
 
 class _TelinkLightBase(LightEntity):
-    """Shared behaviour of node and group lights."""
+    """Shared behaviour of lamp and group lights."""
 
     _attr_has_entity_name = True
     _attr_should_poll = False
@@ -88,7 +87,8 @@ class _TelinkLightBase(LightEntity):
         self._attr_max_color_temp_kelvin = coordinator.color_temp_max
 
     @property
-    def target(self) -> int:
+    def target(self) -> str | None:
+        """MAC of the lamp, or None to broadcast to all lamps."""
         raise NotImplementedError
 
     async def async_added_to_hass(self) -> None:
@@ -122,19 +122,17 @@ class _TelinkLightBase(LightEntity):
 
 
 class TelinkNodeLight(_TelinkLightBase):
-    """One lamp of the mesh."""
+    """One lamp, controlled over its own direct connection."""
 
     def __init__(self, coordinator: TelinkMeshCoordinator, node: TelinkNode) -> None:
         super().__init__(coordinator)
         self._node = node
         entry_id = coordinator.entry.entry_id
-        self._attr_unique_id = f"{entry_id}_{node.mesh_id}"
+        self._attr_unique_id = f"{entry_id}_{node.mac}"
         self._attr_name = None
-        valid_mac = bool(node.mac) and node.mac != "00:00:00:00:00:00"
-        connections = {(CONNECTION_BLUETOOTH, node.mac)} if valid_mac else set()
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, f"{entry_id}_{node.mesh_id}")},
-            connections=connections,
+            identifiers={(DOMAIN, f"{entry_id}_{node.mac}")},
+            connections={(CONNECTION_BLUETOOTH, node.mac)},
             name=node.name or f"{coordinator.mesh_name} {node.mesh_id}",
             manufacturer=MANUFACTURER,
             model=f"Mesh node 0x{node.mesh_id:02X}",
@@ -142,15 +140,12 @@ class TelinkNodeLight(_TelinkLightBase):
         )
 
     @property
-    def target(self) -> int:
-        return self._node.mesh_id
+    def target(self) -> str | None:
+        return self._node.mac
 
     @property
     def available(self) -> bool:
-        # Availability follows the mesh connection, with a short grace during
-        # reconnects so a command can still trigger recovery. The per-node
-        # online heartbeat only enriches state.
-        return self.coordinator.available
+        return self.coordinator.node_available(self._node.mac)
 
     @property
     def is_on(self) -> bool:
@@ -178,12 +173,12 @@ class TelinkNodeLight(_TelinkLightBase):
             "mesh_id": self._node.mesh_id,
             "mac": self._node.mac,
             "rssi": self._node.rssi,
-            "connected_via": self.coordinator.connected_address,
+            "connected_via": self.coordinator.connected_address(self._node.mac),
         }
 
 
 class TelinkMeshAllLight(_TelinkLightBase):
-    """Broadcast light controlling every node of the mesh at once."""
+    """Broadcast light controlling every lamp of the mesh at once."""
 
     _attr_translation_key = "all_lights"
 
@@ -194,35 +189,38 @@ class TelinkMeshAllLight(_TelinkLightBase):
         self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, entry_id)})
 
     @property
-    def target(self) -> int:
-        return ADDR_ALL
+    def target(self) -> str | None:
+        return None
 
     @property
     def available(self) -> bool:
-        return self.coordinator.available
+        return self.coordinator.any_available
 
-    def _online_nodes(self) -> list[TelinkNode]:
-        return [n for n in self.coordinator.nodes.values() if n.online]
+    def _live_nodes(self) -> list[TelinkNode]:
+        return [
+            n for n in self.coordinator.nodes.values()
+            if self.coordinator.node_available(n.mac)
+        ]
 
     @property
     def is_on(self) -> bool:
-        return any(n.is_on for n in self._online_nodes())
+        return any(n.is_on for n in self._live_nodes())
 
     @property
     def brightness(self) -> int | None:
-        levels = [n.brightness for n in self._online_nodes() if n.is_on and n.brightness]
+        levels = [n.brightness for n in self._live_nodes() if n.is_on and n.brightness]
         return _to_ha_brightness(max(levels)) if levels else None
 
     @property
     def rgb_color(self) -> tuple[int, int, int] | None:
-        for node in self._online_nodes():
+        for node in self._live_nodes():
             if node.is_on and node.rgb:
                 return node.rgb
         return None
 
     @property
     def color_temp_kelvin(self) -> int | None:
-        for node in self._online_nodes():
+        for node in self._live_nodes():
             if node.is_on and node.color_temp_kelvin:
                 return node.color_temp_kelvin
         return None
@@ -233,8 +231,8 @@ class TelinkMeshAllLight(_TelinkLightBase):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        nodes = list(self.coordinator.nodes.values())
         return {
-            "connected_via": self.coordinator.connected_address,
-            "nodes_online": len(self._online_nodes()),
-            "nodes_total": len(self.coordinator.nodes),
+            "lamps_total": len(nodes),
+            "lamps_available": len(self._live_nodes()),
         }
