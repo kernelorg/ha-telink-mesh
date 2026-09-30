@@ -524,6 +524,16 @@ class TelinkMeshCoordinator:
         link = self.links.get(mac)
         return [link] if link else []
 
+    def _updated_links(self, mac: str | None, succeeded: list[LampLink]) -> list[LampLink]:
+        """Lamps whose state a command changed.
+
+        The mesh relays a broadcast, so once any connection took it every lamp
+        reacted, including those whose own link was down at that moment.
+        """
+        if mac is None and succeeded:
+            return list(self.links.values())
+        return succeeded
+
     async def async_turn_on(
         self,
         mac: str | None,
@@ -536,6 +546,7 @@ class TelinkMeshCoordinator:
         if not links:
             raise HomeAssistantError(f"Telink mesh '{self.mesh_name}': no such lamp")
         errors: list[Exception] = []
+        succeeded: list[LampLink] = []
         for link in links:
             node = link.node
             # A specific lamp is addressed by its own mesh id so relaying lamps
@@ -565,16 +576,19 @@ class TelinkMeshCoordinator:
             except HomeAssistantError as err:
                 errors.append(err)
                 continue
+            succeeded.append(link)
+            link.schedule_refresh()
+        for link in self._updated_links(mac, succeeded):
+            node = link.node
             node.is_on = True
             if brightness is not None or rgb is not None or color_temp_kelvin is not None:
-                node.brightness = level
+                node.brightness = brightness if brightness is not None else (node.brightness or 100)
             if rgb is not None:
                 node.rgb = rgb
                 node.color_temp_kelvin = None
             elif color_temp_kelvin is not None:
                 node.color_temp_kelvin = color_temp_kelvin
                 node.rgb = None
-            link.schedule_refresh()
         self._schedule_save()
         self.notify_listeners()
         if errors and len(errors) == len(links):
@@ -585,6 +599,7 @@ class TelinkMeshCoordinator:
         if not links:
             raise HomeAssistantError(f"Telink mesh '{self.mesh_name}': no such lamp")
         errors: list[Exception] = []
+        succeeded: list[LampLink] = []
         for link in links:
             target = ADDR_ALL if mac is None else link.node.mesh_id
             try:
@@ -593,8 +608,10 @@ class TelinkMeshCoordinator:
             except HomeAssistantError as err:
                 errors.append(err)
                 continue
-            link.node.is_on = False
+            succeeded.append(link)
             link.schedule_refresh()
+        for link in self._updated_links(mac, succeeded):
+            link.node.is_on = False
         self._schedule_save()
         self.notify_listeners()
         if errors and len(errors) == len(links):

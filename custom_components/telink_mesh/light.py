@@ -211,19 +211,26 @@ class TelinkMeshAllLight(_TelinkLightBase):
         levels = [n.brightness for n in self._live_nodes() if n.is_on and n.brightness]
         return _to_ha_brightness(max(levels)) if levels else None
 
-    @property
-    def rgb_color(self) -> tuple[int, int, int] | None:
+    def _color_node(self) -> TelinkNode | None:
+        """Lamp whose colour represents the group.
+
+        Colour and colour temperature must come from the same lamp: mixing one
+        lamp's RGB with another's white would flip the group to colour-temp mode.
+        """
         for node in self._live_nodes():
-            if node.is_on and node.rgb:
-                return node.rgb
+            if node.is_on and (node.rgb or node.color_temp_kelvin):
+                return node
         return None
 
     @property
+    def rgb_color(self) -> tuple[int, int, int] | None:
+        node = self._color_node()
+        return node.rgb if node else None
+
+    @property
     def color_temp_kelvin(self) -> int | None:
-        for node in self._live_nodes():
-            if node.is_on and node.color_temp_kelvin:
-                return node.color_temp_kelvin
-        return None
+        node = self._color_node()
+        return node.color_temp_kelvin if node else None
 
     @property
     def color_mode(self) -> ColorMode:
