@@ -92,15 +92,37 @@ class TelinkNode:
     last_seen: float = 0.0
     rssi: int | None = None
 
+    def state_snapshot(self) -> tuple[Any, ...]:
+        """Persisted light state, used to detect changes worth saving."""
+        return (self.is_on, self.brightness, self.rgb, self.color_temp_kelvin)
+
     def to_storage(self) -> dict[str, Any]:
-        return {"mac": self.mac, "mesh_id": self.mesh_id, "name": self.name}
+        return {
+            "mac": self.mac,
+            "mesh_id": self.mesh_id,
+            "name": self.name,
+            "is_on": self.is_on,
+            "brightness": self.brightness,
+            "rgb": list(self.rgb) if self.rgb else None,
+            "color_temp_kelvin": self.color_temp_kelvin,
+        }
 
     @classmethod
     def from_storage(cls, data: dict[str, Any]) -> TelinkNode | None:
         mac = data.get("mac")
         if not mac or mac.upper() == "00:00:00:00:00:00":
             return None
-        return cls(mac=mac.upper(), mesh_id=int(data.get("mesh_id", mesh_id_from_mac(mac))), name=data.get("name"))
+        rgb = data.get("rgb")
+        kelvin = data.get("color_temp_kelvin")
+        return cls(
+            mac=mac.upper(),
+            mesh_id=int(data.get("mesh_id", mesh_id_from_mac(mac))),
+            name=data.get("name"),
+            is_on=bool(data.get("is_on", False)),
+            brightness=int(data.get("brightness") or 0),
+            rgb=tuple(int(c) for c in rgb) if rgb and len(rgb) == 3 else None,
+            color_temp_kelvin=int(kelvin) if kelvin else None,
+        )
 
 
 def mesh_id_from_mac(mac: str) -> int:
@@ -457,6 +479,7 @@ class TelinkMeshCoordinator:
     @callback
     def handle_notification(self, node: TelinkNode, note: Notification) -> None:
         now = time.monotonic()
+        before = node.state_snapshot()
         try:
             if note.opcode == OP_ONLINE_STATUS:
                 for entry in parse_online_status(note.params):
@@ -486,6 +509,8 @@ class TelinkMeshCoordinator:
         except TelinkProtocolError as err:
             _LOGGER.debug("Mesh %s: %s", self.mesh_name, err)
             return
+        if node.state_snapshot() != before:
+            self._schedule_save()
         self.notify_listeners()
 
     async def _async_poll(self, _now: datetime) -> None:
@@ -550,6 +575,7 @@ class TelinkMeshCoordinator:
                 node.color_temp_kelvin = color_temp_kelvin
                 node.rgb = None
             link.schedule_refresh()
+        self._schedule_save()
         self.notify_listeners()
         if errors and len(errors) == len(links):
             raise errors[0]
@@ -569,6 +595,7 @@ class TelinkMeshCoordinator:
                 continue
             link.node.is_on = False
             link.schedule_refresh()
+        self._schedule_save()
         self.notify_listeners()
         if errors and len(errors) == len(links):
             raise errors[0]
