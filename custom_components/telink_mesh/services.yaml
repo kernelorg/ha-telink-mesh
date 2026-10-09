@@ -1,0 +1,23 @@
+set_mesh_credentials:
+  target:
+    entity:
+      integration: telink_mesh
+      domain: light
+  fields:
+    mesh_name:
+      required: true
+      example: "Home1"
+      selector:
+        text:
+    mesh_password:
+      required: true
+      example: "7351"
+      selector:
+        text:
+          type: password
+    long_term_key:
+      required: false
+      advanced: true
+      example: "c0c1c2c3c4c5c6c7c8c9cacbcccdcecf"
+      selector:
+        text:

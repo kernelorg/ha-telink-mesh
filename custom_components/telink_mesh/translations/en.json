@@ -1,0 +1,117 @@
+{
+  "config": {
+    "flow_title": "Telink mesh {name}",
+    "step": {
+      "user": {
+        "title": "Add a Telink BLE mesh",
+        "description": "Meshes currently advertising: {count}. Choose your product to fill in the mesh name and password automatically, or pick Manual entry.",
+        "data": {
+          "preset": "Product / preset"
+        }
+      },
+      "bluetooth_confirm": {
+        "title": "Telink mesh discovered",
+        "description": "Device {address} advertises mesh **{name}**. Choose your product to fill in the credentials automatically, or pick Manual entry.",
+        "data": {
+          "preset": "Product / preset"
+        }
+      },
+      "credentials": {
+        "title": "Mesh credentials",
+        "description": "Preset: {preset}. Check the mesh name and password (edit if needed), then choose the command set and light capabilities.",
+        "data": {
+          "mesh_name": "Mesh name",
+          "mesh_password": "Mesh password",
+          "profile": "Command set",
+          "color_mode": "Light capabilities"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Mesh {name} rejected the password",
+        "data": {
+          "mesh_password": "Mesh password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not connect to any node of the mesh. Make sure a lamp is powered and within range of a Bluetooth adapter or ESPHome proxy.",
+      "invalid_auth": "The lamp rejected the mesh name / password.",
+      "no_devices_found": "No Telink device advertising this mesh name is in range."
+    },
+    "abort": {
+      "already_configured": "This mesh is already configured.",
+      "already_in_progress": "Configuration of this mesh is already in progress.",
+      "not_supported": "This device is not a Telink mesh device.",
+      "reauth_successful": "The password was updated."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Telink mesh options",
+        "data": {
+          "profile": "Command set",
+          "color_mode": "Light capabilities",
+          "color_temp_min": "Minimum white colour temperature (K)",
+          "color_temp_max": "Maximum white colour temperature (K)",
+          "write_with_response": "Write commands with response (slower, more reliable on some proxies)",
+          "poll_interval": "Status poll interval"
+        }
+      }
+    },
+    "error": {
+      "bad_color_temp_range": "The maximum temperature must be greater than the minimum."
+    }
+  },
+  "selector": {
+    "preset": {
+      "options": {
+        "mesh_lamp": "Mesh Lamp / Fulife (name: Fulife)",
+        "vtac": "V-TAC smart bulb (name: Fulife)",
+        "manual": "Manual entry"
+      }
+    },
+    "profile": {
+      "options": {
+        "livarno": "Lidl Livarno / Briloner / C by GE (opcodes 0xF0/0xF1)",
+        "generic": "Generic Telink SDK (opcodes 0xD0/0xD2/0xE2)"
+      }
+    },
+    "color_mode": {
+      "options": {
+        "rgb_ct": "RGB + white colour temperature",
+        "rgb": "RGB only",
+        "ct": "White colour temperature only",
+        "brightness": "Dimmable white",
+        "onoff": "On/off only"
+      }
+    }
+  },
+  "entity": {
+    "light": {
+      "all_lights": {
+        "name": "All lights"
+      }
+    }
+  },
+  "services": {
+    "set_mesh_credentials": {
+      "name": "Set mesh name and password",
+      "description": "Moves the selected lamps to another mesh network: each lamp gets the new mesh name and password over its own connection and then leaves this integration entry. Add (or keep) an entry with the new credentials to control them again. Lamps that should keep relaying for each other need the same name, password and long-term key.",
+      "fields": {
+        "mesh_name": {
+          "name": "Mesh name",
+          "description": "New mesh name, up to 16 bytes."
+        },
+        "mesh_password": {
+          "name": "Mesh password",
+          "description": "New mesh password, up to 16 bytes. Must differ from the name."
+        },
+        "long_term_key": {
+          "name": "Long-term key",
+          "description": "16-byte key as 32 hex characters. Defaults to the Telink SDK key c0..cf."
+        }
+      }
+    }
+  }
+}
